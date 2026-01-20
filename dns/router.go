@@ -37,6 +37,9 @@ type Router struct {
 	client                adapter.DNSClient
 	rules                 []adapter.DNSRule
 	defaultDomainStrategy C.DomainStrategy
+	upstreamTimeout       time.Duration
+	fallbackTimeout       time.Duration
+	fallbackGrace         time.Duration
 	dnsReverseMapping     freelru.Cache[netip.Addr, string]
 	platformInterface     platform.Interface
 }
@@ -50,6 +53,9 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 		rules:                 make([]adapter.DNSRule, 0, len(options.Rules)),
 		defaultDomainStrategy: C.DomainStrategy(options.Strategy),
 	}
+	router.upstreamTimeout = time.Duration(options.DNSClientOptions.UpstreamTimeoutMS) * time.Millisecond
+	router.fallbackTimeout = time.Duration(options.DNSClientOptions.FallbackTimeoutMS) * time.Millisecond
+	router.fallbackGrace = time.Duration(options.DNSClientOptions.FallbackGraceMS) * time.Millisecond
 	router.client = NewClient(ClientOptions{
 		DisableCache:     options.DNSClientOptions.DisableCache,
 		DisableExpire:    options.DNSClientOptions.DisableExpire,
@@ -118,7 +124,7 @@ func (r *Router) Close() error {
 	return err
 }
 
-func (r *Router) matchDNS(ctx context.Context, allowFakeIP bool, ruleIndex int, isAddressQuery bool, options *adapter.DNSQueryOptions) (adapter.DNSTransport, adapter.DNSRule, int) {
+func (r *Router) matchDNS(ctx context.Context, allowFakeIP bool, ruleIndex int, isAddressQuery bool, options *adapter.DNSQueryOptions) ([]adapter.DNSTransport, []adapter.DNSTransport, time.Duration, time.Duration, time.Duration, adapter.DNSRule, int) {
 	metadata := adapter.ContextFrom(ctx)
 	if metadata == nil {
 		panic("no context")
@@ -146,19 +152,65 @@ func (r *Router) matchDNS(ctx context.Context, allowFakeIP bool, ruleIndex int, 
 			}
 			switch action := currentRule.Action().(type) {
 			case *R.RuleActionDNSRoute:
-				transport, loaded := r.transport.Transport(action.Server)
-				if !loaded {
-					r.logger.ErrorContext(ctx, "transport not found: ", action.Server)
+				if len(action.Servers) == 0 {
 					continue
 				}
-				isFakeIP := transport.Type() == C.DNSTypeFakeIP
-				if isFakeIP && !allowFakeIP {
+				serverSet := make(map[string]struct{}, len(action.Servers))
+				transports := make([]adapter.DNSTransport, 0, len(action.Servers))
+				var hasFakeIP bool
+				for _, serverTag := range action.Servers {
+					if serverTag == "" {
+						continue
+					}
+					if _, ok := serverSet[serverTag]; ok {
+						continue
+					}
+					serverSet[serverTag] = struct{}{}
+					transport, loaded := r.transport.Transport(serverTag)
+					if !loaded {
+						r.logger.ErrorContext(ctx, "transport not found: ", serverTag)
+						continue
+					}
+					isFakeIP := transport.Type() == C.DNSTypeFakeIP
+					if isFakeIP {
+						hasFakeIP = true
+						if !allowFakeIP {
+							continue
+						}
+					}
+					transports = append(transports, transport)
+				}
+				if len(transports) == 0 {
 					continue
+				}
+				fallbackSet := make(map[string]struct{}, len(action.FallbackServers))
+				fallbackTransports := make([]adapter.DNSTransport, 0, len(action.FallbackServers))
+				for _, serverTag := range action.FallbackServers {
+					if serverTag == "" {
+						continue
+					}
+					if _, ok := fallbackSet[serverTag]; ok {
+						continue
+					}
+					fallbackSet[serverTag] = struct{}{}
+					transport, loaded := r.transport.Transport(serverTag)
+					if !loaded {
+						r.logger.ErrorContext(ctx, "fallback transport not found: ", serverTag)
+						continue
+					}
+					isFakeIP := transport.Type() == C.DNSTypeFakeIP
+					if isFakeIP {
+						hasFakeIP = true
+						if !allowFakeIP {
+							continue
+						}
+					}
+					fallbackTransports = append(fallbackTransports, transport)
 				}
 				if action.Strategy != C.DomainStrategyAsIS {
 					options.Strategy = action.Strategy
 				}
-				if isFakeIP || action.DisableCache {
+				if hasFakeIP || action.DisableCache {
 					options.DisableCache = true
 				}
 				if action.RewriteTTL != nil {
@@ -167,15 +219,32 @@ func (r *Router) matchDNS(ctx context.Context, allowFakeIP bool, ruleIndex int, 
 				if action.ClientSubnet.IsValid() {
 					options.ClientSubnet = action.ClientSubnet
 				}
-				if legacyTransport, isLegacy := transport.(adapter.LegacyDNSTransport); isLegacy {
-					if options.Strategy == C.DomainStrategyAsIS {
-						options.Strategy = legacyTransport.LegacyStrategy()
-					}
-					if !options.ClientSubnet.IsValid() {
-						options.ClientSubnet = legacyTransport.LegacyClientSubnet()
+				if len(transports) == 1 {
+					if legacyTransport, isLegacy := transports[0].(adapter.LegacyDNSTransport); isLegacy {
+						if options.Strategy == C.DomainStrategyAsIS {
+							options.Strategy = legacyTransport.LegacyStrategy()
+						}
+						if !options.ClientSubnet.IsValid() {
+							options.ClientSubnet = legacyTransport.LegacyClientSubnet()
+						}
 					}
 				}
-				return transport, currentRule, currentRuleIndex
+				upstreamTimeout := action.UpstreamTimeout
+				if upstreamTimeout == 0 {
+					upstreamTimeout = r.upstreamTimeout
+				}
+				fallbackTimeout := action.FallbackTimeout
+				if fallbackTimeout == 0 {
+					fallbackTimeout = r.fallbackTimeout
+				}
+				if fallbackTimeout == 0 {
+					fallbackTimeout = upstreamTimeout
+				}
+				fallbackGrace := action.FallbackGrace
+				if fallbackGrace == 0 {
+					fallbackGrace = r.fallbackGrace
+				}
+				return transports, fallbackTransports, upstreamTimeout, fallbackTimeout, fallbackGrace, currentRule, currentRuleIndex
 			case *R.RuleActionDNSRouteOptions:
 				if action.Strategy != C.DomainStrategyAsIS {
 					options.Strategy = action.Strategy
@@ -190,13 +259,17 @@ func (r *Router) matchDNS(ctx context.Context, allowFakeIP bool, ruleIndex int, 
 					options.ClientSubnet = action.ClientSubnet
 				}
 			case *R.RuleActionReject:
-				return nil, currentRule, currentRuleIndex
+				return nil, nil, r.upstreamTimeout, r.fallbackTimeout, r.fallbackGrace, currentRule, currentRuleIndex
 			case *R.RuleActionPredefined:
-				return nil, currentRule, currentRuleIndex
+				return nil, nil, r.upstreamTimeout, r.fallbackTimeout, r.fallbackGrace, currentRule, currentRuleIndex
 			}
 		}
 	}
-	return r.transport.Default(), nil, -1
+	defaultTransport := r.transport.Default()
+	if defaultTransport == nil {
+		return nil, nil, r.upstreamTimeout, r.fallbackTimeout, r.fallbackGrace, nil, -1
+	}
+	return []adapter.DNSTransport{defaultTransport}, nil, r.upstreamTimeout, r.fallbackTimeout, r.fallbackGrace, nil, -1
 }
 
 func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapter.DNSQueryOptions) (*mDNS.Msg, error) {
@@ -214,9 +287,9 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 	}
 	r.logger.DebugContext(ctx, "exchange ", FormatQuestion(message.Question[0].String()))
 	var (
-		response  *mDNS.Msg
-		transport adapter.DNSTransport
-		err       error
+		response          *mDNS.Msg
+		selectedTransport adapter.DNSTransport
+		err              error
 	)
 	var metadata *adapter.InboundContext
 	ctx, metadata = adapter.ExtendContext(ctx)
@@ -230,8 +303,8 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 	}
 	metadata.Domain = FqdnToDomain(message.Question[0].Name)
 	if options.Transport != nil {
-		transport = options.Transport
-		if legacyTransport, isLegacy := transport.(adapter.LegacyDNSTransport); isLegacy {
+		selectedTransport = options.Transport
+		if legacyTransport, isLegacy := selectedTransport.(adapter.LegacyDNSTransport); isLegacy {
 			if options.Strategy == C.DomainStrategyAsIS {
 				options.Strategy = legacyTransport.LegacyStrategy()
 			}
@@ -242,17 +315,32 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 		if options.Strategy == C.DomainStrategyAsIS {
 			options.Strategy = r.defaultDomainStrategy
 		}
-		response, err = r.client.Exchange(ctx, transport, message, options, nil)
+		queryCtx := ctx
+		var cancel context.CancelFunc
+		if r.upstreamTimeout > 0 {
+			queryCtx, cancel = context.WithTimeout(ctx, r.upstreamTimeout)
+		}
+		response, err = r.client.Exchange(queryCtx, selectedTransport, message, options, nil)
+		if cancel != nil {
+			cancel()
+		}
 	} else {
 		var (
-			rule      adapter.DNSRule
-			ruleIndex int
+			rule       adapter.DNSRule
+			ruleIndex  int
+			transports []adapter.DNSTransport
 		)
 		ruleIndex = -1
 		for {
 			dnsCtx := adapter.OverrideContext(ctx)
 			dnsOptions := options
-			transport, rule, ruleIndex = r.matchDNS(ctx, true, ruleIndex, isAddressQuery(message), &dnsOptions)
+			var (
+				fallbackTransports []adapter.DNSTransport
+				upstreamTimeout    time.Duration
+				fallbackTimeout    time.Duration
+				fallbackGrace      time.Duration
+			)
+			transports, fallbackTransports, upstreamTimeout, fallbackTimeout, fallbackGrace, rule, ruleIndex = r.matchDNS(ctx, true, ruleIndex, isAddressQuery(message), &dnsOptions)
 			if rule != nil {
 				switch action := rule.Action().(type) {
 				case *R.RuleActionReject:
@@ -273,17 +361,54 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 					return action.Response(message), nil
 				}
 			}
-			var responseCheck func(responseAddrs []netip.Addr) bool
-			if rule != nil && rule.WithAddressLimit() {
-				responseCheck = func(responseAddrs []netip.Addr) bool {
-					metadata.DestinationAddresses = responseAddrs
-					return rule.MatchAddressLimit(metadata)
+			withAddressLimit := rule != nil && rule.WithAddressLimit()
+			primaryOptions := dnsOptions
+			fallbackOptions := dnsOptions
+			if len(transports) == 1 {
+				if legacyTransport, isLegacy := transports[0].(adapter.LegacyDNSTransport); isLegacy {
+					if primaryOptions.Strategy == C.DomainStrategyAsIS {
+						primaryOptions.Strategy = legacyTransport.LegacyStrategy()
+					}
+					if !primaryOptions.ClientSubnet.IsValid() {
+						primaryOptions.ClientSubnet = legacyTransport.LegacyClientSubnet()
+					}
 				}
 			}
-			if dnsOptions.Strategy == C.DomainStrategyAsIS {
-				dnsOptions.Strategy = r.defaultDomainStrategy
+			if len(fallbackTransports) == 1 {
+				if legacyTransport, isLegacy := fallbackTransports[0].(adapter.LegacyDNSTransport); isLegacy {
+					if fallbackOptions.Strategy == C.DomainStrategyAsIS {
+						fallbackOptions.Strategy = legacyTransport.LegacyStrategy()
+					}
+					if !fallbackOptions.ClientSubnet.IsValid() {
+						fallbackOptions.ClientSubnet = legacyTransport.LegacyClientSubnet()
+					}
+				}
 			}
-			response, err = r.client.Exchange(dnsCtx, transport, message, dnsOptions, responseCheck)
+			if primaryOptions.Strategy == C.DomainStrategyAsIS {
+				primaryOptions.Strategy = r.defaultDomainStrategy
+			}
+			if fallbackOptions.Strategy == C.DomainStrategyAsIS {
+				fallbackOptions.Strategy = r.defaultDomainStrategy
+			}
+			if client, ok := r.client.(*Client); ok && !client.independentCache {
+				if len(transports) > 1 {
+					// Avoid global cache pollution and cacheLock serialisation when racing.
+					primaryOptions.DisableCache = true
+				}
+				if upstreamTimeout > 0 && len(fallbackTransports) > 0 {
+					// Avoid cacheLock serialisation/pollution when starting fallback queries.
+					fallbackOptions.DisableCache = true
+				}
+			}
+			if upstreamTimeout > 0 && len(fallbackTransports) > 0 {
+				response, selectedTransport, err = r.exchangeHedgedRacer(dnsCtx, transports, fallbackTransports, message, primaryOptions, fallbackOptions, rule, withAddressLimit, upstreamTimeout, fallbackTimeout, fallbackGrace)
+			} else if upstreamTimeout > 0 {
+				queryCtx, cancel := context.WithTimeout(dnsCtx, upstreamTimeout)
+				response, selectedTransport, err = r.exchangeRacer(queryCtx, transports, message, primaryOptions, rule, withAddressLimit)
+				cancel()
+			} else {
+				response, selectedTransport, err = r.exchangeRacer(dnsCtx, transports, message, primaryOptions, rule, withAddressLimit)
+			}
 			var rejected bool
 			if err != nil {
 				if errors.Is(err, ErrResponseRejectedCached) {
@@ -298,7 +423,7 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 					r.logger.ErrorContext(ctx, E.Cause(err, "exchange failed for <empty query>"))
 				}
 			}
-			if responseCheck != nil && rejected {
+			if withAddressLimit && rejected {
 				continue
 			}
 			break
@@ -308,7 +433,7 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 		return nil, err
 	}
 	if r.dnsReverseMapping != nil && len(message.Question) > 0 && response != nil && len(response.Answer) > 0 {
-		if transport == nil || transport.Type() != C.DNSTypeFakeIP {
+		if selectedTransport == nil || selectedTransport.Type() != C.DNSTypeFakeIP {
 			for _, answer := range response.Answer {
 				switch record := answer.(type) {
 				case *mDNS.A:
@@ -352,7 +477,7 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 		transport := options.Transport
 		if legacyTransport, isLegacy := transport.(adapter.LegacyDNSTransport); isLegacy {
 			if options.Strategy == C.DomainStrategyAsIS {
-				options.Strategy = r.defaultDomainStrategy
+				options.Strategy = legacyTransport.LegacyStrategy()
 			}
 			if !options.ClientSubnet.IsValid() {
 				options.ClientSubnet = legacyTransport.LegacyClientSubnet()
@@ -361,18 +486,32 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 		if options.Strategy == C.DomainStrategyAsIS {
 			options.Strategy = r.defaultDomainStrategy
 		}
-		responseAddrs, err = r.client.Lookup(ctx, transport, domain, options, nil)
+		queryCtx := ctx
+		var cancel context.CancelFunc
+		if r.upstreamTimeout > 0 {
+			queryCtx, cancel = context.WithTimeout(ctx, r.upstreamTimeout)
+		}
+		responseAddrs, err = r.client.Lookup(queryCtx, transport, domain, options, nil)
+		if cancel != nil {
+			cancel()
+		}
 	} else {
 		var (
-			transport adapter.DNSTransport
-			rule      adapter.DNSRule
-			ruleIndex int
+			rule       adapter.DNSRule
+			ruleIndex  int
+			transports []adapter.DNSTransport
 		)
 		ruleIndex = -1
 		for {
 			dnsCtx := adapter.OverrideContext(ctx)
 			dnsOptions := options
-			transport, rule, ruleIndex = r.matchDNS(ctx, false, ruleIndex, true, &dnsOptions)
+			var (
+				fallbackTransports []adapter.DNSTransport
+				upstreamTimeout    time.Duration
+				fallbackTimeout    time.Duration
+				fallbackGrace      time.Duration
+			)
+			transports, fallbackTransports, upstreamTimeout, fallbackTimeout, fallbackGrace, rule, ruleIndex = r.matchDNS(ctx, false, ruleIndex, true, &dnsOptions)
 			if rule != nil {
 				switch action := rule.Action().(type) {
 				case *R.RuleActionReject:
@@ -393,18 +532,55 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 					goto response
 				}
 			}
-			var responseCheck func(responseAddrs []netip.Addr) bool
-			if rule != nil && rule.WithAddressLimit() {
-				responseCheck = func(responseAddrs []netip.Addr) bool {
-					metadata.DestinationAddresses = responseAddrs
-					return rule.MatchAddressLimit(metadata)
+			withAddressLimit := rule != nil && rule.WithAddressLimit()
+			primaryOptions := dnsOptions
+			fallbackOptions := dnsOptions
+			if len(transports) == 1 {
+				if legacyTransport, isLegacy := transports[0].(adapter.LegacyDNSTransport); isLegacy {
+					if primaryOptions.Strategy == C.DomainStrategyAsIS {
+						primaryOptions.Strategy = legacyTransport.LegacyStrategy()
+					}
+					if !primaryOptions.ClientSubnet.IsValid() {
+						primaryOptions.ClientSubnet = legacyTransport.LegacyClientSubnet()
+					}
 				}
 			}
-			if dnsOptions.Strategy == C.DomainStrategyAsIS {
-				dnsOptions.Strategy = r.defaultDomainStrategy
+			if len(fallbackTransports) == 1 {
+				if legacyTransport, isLegacy := fallbackTransports[0].(adapter.LegacyDNSTransport); isLegacy {
+					if fallbackOptions.Strategy == C.DomainStrategyAsIS {
+						fallbackOptions.Strategy = legacyTransport.LegacyStrategy()
+					}
+					if !fallbackOptions.ClientSubnet.IsValid() {
+						fallbackOptions.ClientSubnet = legacyTransport.LegacyClientSubnet()
+					}
+				}
 			}
-			responseAddrs, err = r.client.Lookup(dnsCtx, transport, domain, dnsOptions, responseCheck)
-			if responseCheck == nil || err == nil {
+			if primaryOptions.Strategy == C.DomainStrategyAsIS {
+				primaryOptions.Strategy = r.defaultDomainStrategy
+			}
+			if fallbackOptions.Strategy == C.DomainStrategyAsIS {
+				fallbackOptions.Strategy = r.defaultDomainStrategy
+			}
+			if client, ok := r.client.(*Client); ok && !client.independentCache {
+				if len(transports) > 1 {
+					// Avoid global cache pollution and cacheLock serialisation when racing.
+					primaryOptions.DisableCache = true
+				}
+				if upstreamTimeout > 0 && len(fallbackTransports) > 0 {
+					// Avoid cacheLock serialisation/pollution when starting fallback queries.
+					fallbackOptions.DisableCache = true
+				}
+			}
+			if upstreamTimeout > 0 && len(fallbackTransports) > 0 {
+				responseAddrs, err = r.lookupHedgedRacer(dnsCtx, transports, fallbackTransports, domain, primaryOptions, fallbackOptions, rule, withAddressLimit, upstreamTimeout, fallbackTimeout, fallbackGrace)
+			} else if upstreamTimeout > 0 {
+				queryCtx, cancel := context.WithTimeout(dnsCtx, upstreamTimeout)
+				responseAddrs, err = r.lookupRacer(queryCtx, transports, domain, primaryOptions, rule, withAddressLimit)
+				cancel()
+			} else {
+				responseAddrs, err = r.lookupRacer(dnsCtx, transports, domain, primaryOptions, rule, withAddressLimit)
+			}
+			if !withAddressLimit || err == nil {
 				break
 			}
 			printResult()
@@ -416,6 +592,446 @@ response:
 		r.logger.InfoContext(ctx, "lookup succeed for ", domain, ": ", strings.Join(F.MapToString(responseAddrs), " "))
 	}
 	return responseAddrs, err
+}
+
+func (r *Router) exchangeHedgedRacer(ctx context.Context, primaryTransports []adapter.DNSTransport, fallbackTransports []adapter.DNSTransport, message *mDNS.Msg, primaryOptions adapter.DNSQueryOptions, fallbackOptions adapter.DNSQueryOptions, rule adapter.DNSRule, withAddressLimit bool, upstreamTimeout time.Duration, fallbackTimeout time.Duration, fallbackGrace time.Duration) (*mDNS.Msg, adapter.DNSTransport, error) {
+	if upstreamTimeout <= 0 || len(fallbackTransports) == 0 {
+		return r.exchangeRacer(ctx, primaryTransports, message, primaryOptions, rule, withAddressLimit)
+	}
+	returned := make(chan struct{})
+	defer close(returned)
+	type queryResult struct {
+		response  *mDNS.Msg
+		err       error
+		transport adapter.DNSTransport
+	}
+	results := make(chan queryResult)
+	queryCtx, queryCancel := context.WithCancel(ctx)
+	defer queryCancel()
+	primaryTimeout := upstreamTimeout
+	if fallbackGrace > 0 {
+		primaryTimeout += fallbackGrace
+	}
+	primaryCtx, primaryCancel := context.WithTimeout(queryCtx, primaryTimeout)
+	defer primaryCancel()
+	fallbackStart := make(chan struct{})
+	go func() {
+		timer := time.NewTimer(upstreamTimeout)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-queryCtx.Done():
+		}
+		close(fallbackStart)
+	}()
+	for _, transport := range primaryTransports {
+		transport := transport
+		go func() {
+			perQueryCtx := adapter.OverrideContext(primaryCtx)
+			msgCopy := message.Copy()
+			var responseCheck func(responseAddrs []netip.Addr) bool
+			if withAddressLimit && rule != nil {
+				metadata := adapter.ContextFrom(perQueryCtx)
+				if metadata != nil {
+					baseMetadata := *metadata
+					responseCheck = func(responseAddrs []netip.Addr) bool {
+						md := baseMetadata
+						md.ResetRuleCache()
+						md.DestinationAddresses = responseAddrs
+						return rule.MatchAddressLimit(&md)
+					}
+				}
+			}
+			response, err := r.client.Exchange(perQueryCtx, transport, msgCopy, primaryOptions, responseCheck)
+			select {
+			case results <- queryResult{response, err, transport}:
+			case <-returned:
+			}
+		}()
+	}
+	for _, transport := range fallbackTransports {
+		transport := transport
+		go func() {
+			select {
+			case <-fallbackStart:
+			case <-queryCtx.Done():
+				return
+			}
+			if queryCtx.Err() != nil {
+				return
+			}
+			perQueryCtx := adapter.OverrideContext(queryCtx)
+			var cancel context.CancelFunc
+			if fallbackTimeout > 0 {
+				perQueryCtx, cancel = context.WithTimeout(perQueryCtx, fallbackTimeout)
+			}
+			msgCopy := message.Copy()
+			var responseCheck func(responseAddrs []netip.Addr) bool
+			if withAddressLimit && rule != nil {
+				metadata := adapter.ContextFrom(perQueryCtx)
+				if metadata != nil {
+					baseMetadata := *metadata
+					responseCheck = func(responseAddrs []netip.Addr) bool {
+						md := baseMetadata
+						md.ResetRuleCache()
+						md.DestinationAddresses = responseAddrs
+						return rule.MatchAddressLimit(&md)
+					}
+				}
+			}
+			response, err := r.client.Exchange(perQueryCtx, transport, msgCopy, fallbackOptions, responseCheck)
+			if cancel != nil {
+				cancel()
+			}
+			select {
+			case results <- queryResult{response, err, transport}:
+			case <-returned:
+			}
+		}()
+	}
+	total := len(primaryTransports) + len(fallbackTransports)
+	var (
+		fallbackResponse  *mDNS.Msg
+		fallbackTransport adapter.DNSTransport
+		hasFallback       bool
+		errorsList        []error
+		allRejected       = true
+		allRejectedOnly   = true
+	)
+	for i := 0; i < total; i++ {
+		select {
+		case <-ctx.Done():
+			if hasFallback {
+				return fallbackResponse, fallbackTransport, nil
+			}
+			return nil, nil, ctx.Err()
+		case result := <-results:
+			if result.err == nil {
+				// Prefer the first NOERROR response. (Avoid using NXDOMAIN/SERVFAIL etc when a valid answer exists.)
+				if result.response != nil {
+					if !hasFallback {
+						fallbackResponse = result.response
+						fallbackTransport = result.transport
+						hasFallback = true
+					}
+					if result.response.Rcode == mDNS.RcodeSuccess {
+						queryCancel()
+						return result.response, result.transport, nil
+					}
+				}
+				continue
+			}
+			errorsList = append(errorsList, result.err)
+			if errors.Is(result.err, ErrResponseRejectedCached) {
+				// keep allRejectedOnly
+			} else if errors.Is(result.err, ErrResponseRejected) {
+				allRejectedOnly = false
+			} else {
+				allRejected = false
+				allRejectedOnly = false
+			}
+		}
+	}
+	if hasFallback {
+		return fallbackResponse, fallbackTransport, nil
+	}
+	if allRejectedOnly {
+		return nil, nil, ErrResponseRejectedCached
+	}
+	if allRejected {
+		return nil, nil, ErrResponseRejected
+	}
+	return nil, nil, E.Errors(errorsList...)
+}
+
+func (r *Router) lookupHedgedRacer(ctx context.Context, primaryTransports []adapter.DNSTransport, fallbackTransports []adapter.DNSTransport, domain string, primaryOptions adapter.DNSQueryOptions, fallbackOptions adapter.DNSQueryOptions, rule adapter.DNSRule, withAddressLimit bool, upstreamTimeout time.Duration, fallbackTimeout time.Duration, fallbackGrace time.Duration) ([]netip.Addr, error) {
+	if upstreamTimeout <= 0 || len(fallbackTransports) == 0 {
+		return r.lookupRacer(ctx, primaryTransports, domain, primaryOptions, rule, withAddressLimit)
+	}
+	returned := make(chan struct{})
+	defer close(returned)
+	type queryResult struct {
+		addrs []netip.Addr
+		err   error
+	}
+	results := make(chan queryResult)
+	queryCtx, queryCancel := context.WithCancel(ctx)
+	defer queryCancel()
+	primaryTimeout := upstreamTimeout
+	if fallbackGrace > 0 {
+		primaryTimeout += fallbackGrace
+	}
+	primaryCtx, primaryCancel := context.WithTimeout(queryCtx, primaryTimeout)
+	defer primaryCancel()
+	fallbackStart := make(chan struct{})
+	go func() {
+		timer := time.NewTimer(upstreamTimeout)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-queryCtx.Done():
+		}
+		close(fallbackStart)
+	}()
+	for _, transport := range primaryTransports {
+		transport := transport
+		go func() {
+			perQueryCtx := adapter.OverrideContext(primaryCtx)
+			var responseCheck func(responseAddrs []netip.Addr) bool
+			if withAddressLimit && rule != nil {
+				metadata := adapter.ContextFrom(perQueryCtx)
+				if metadata != nil {
+					baseMetadata := *metadata
+					responseCheck = func(responseAddrs []netip.Addr) bool {
+						md := baseMetadata
+						md.ResetRuleCache()
+						md.DestinationAddresses = responseAddrs
+						return rule.MatchAddressLimit(&md)
+					}
+				}
+			}
+			addrs, err := r.client.Lookup(perQueryCtx, transport, domain, primaryOptions, responseCheck)
+			if err == nil && len(addrs) == 0 {
+				err = E.New("empty result")
+			}
+			select {
+			case results <- queryResult{addrs, err}:
+			case <-returned:
+			}
+		}()
+	}
+	for _, transport := range fallbackTransports {
+		transport := transport
+		go func() {
+			select {
+			case <-fallbackStart:
+			case <-queryCtx.Done():
+				return
+			}
+			if queryCtx.Err() != nil {
+				return
+			}
+			perQueryCtx := adapter.OverrideContext(queryCtx)
+			var cancel context.CancelFunc
+			if fallbackTimeout > 0 {
+				perQueryCtx, cancel = context.WithTimeout(perQueryCtx, fallbackTimeout)
+			}
+			var responseCheck func(responseAddrs []netip.Addr) bool
+			if withAddressLimit && rule != nil {
+				metadata := adapter.ContextFrom(perQueryCtx)
+				if metadata != nil {
+					baseMetadata := *metadata
+					responseCheck = func(responseAddrs []netip.Addr) bool {
+						md := baseMetadata
+						md.ResetRuleCache()
+						md.DestinationAddresses = responseAddrs
+						return rule.MatchAddressLimit(&md)
+					}
+				}
+			}
+			addrs, err := r.client.Lookup(perQueryCtx, transport, domain, fallbackOptions, responseCheck)
+			if cancel != nil {
+				cancel()
+			}
+			if err == nil && len(addrs) == 0 {
+				err = E.New("empty result")
+			}
+			select {
+			case results <- queryResult{addrs, err}:
+			case <-returned:
+			}
+		}()
+	}
+	total := len(primaryTransports) + len(fallbackTransports)
+	var (
+		fallbackAddrs []netip.Addr
+		fallbackErr   error
+		hasFallback   bool
+		errorsList    []error
+	)
+	for i := 0; i < total; i++ {
+		select {
+		case <-ctx.Done():
+			if hasFallback {
+				return fallbackAddrs, fallbackErr
+			}
+			return nil, ctx.Err()
+		case result := <-results:
+			if !hasFallback {
+				fallbackAddrs = result.addrs
+				fallbackErr = result.err
+				hasFallback = true
+			}
+			if result.err == nil {
+				queryCancel()
+				return result.addrs, nil
+			}
+			errorsList = append(errorsList, result.err)
+		}
+	}
+	if hasFallback {
+		return fallbackAddrs, fallbackErr
+	}
+	return nil, E.Errors(errorsList...)
+}
+
+func (r *Router) exchangeRacer(ctx context.Context, transports []adapter.DNSTransport, message *mDNS.Msg, options adapter.DNSQueryOptions, rule adapter.DNSRule, withAddressLimit bool) (*mDNS.Msg, adapter.DNSTransport, error) {
+	returned := make(chan struct{})
+	defer close(returned)
+	type queryResult struct {
+		response  *mDNS.Msg
+		err       error
+		transport adapter.DNSTransport
+	}
+	results := make(chan queryResult)
+	queryCtx, queryCancel := context.WithCancel(ctx)
+	defer queryCancel()
+	for _, transport := range transports {
+		transport := transport
+		go func() {
+			perQueryCtx := adapter.OverrideContext(queryCtx)
+			msgCopy := message.Copy()
+			var responseCheck func(responseAddrs []netip.Addr) bool
+			if withAddressLimit && rule != nil {
+				metadata := adapter.ContextFrom(perQueryCtx)
+				if metadata != nil {
+					baseMetadata := *metadata
+					responseCheck = func(responseAddrs []netip.Addr) bool {
+						md := baseMetadata
+						md.ResetRuleCache()
+						md.DestinationAddresses = responseAddrs
+						return rule.MatchAddressLimit(&md)
+					}
+				}
+			}
+			response, err := r.client.Exchange(perQueryCtx, transport, msgCopy, options, responseCheck)
+			select {
+			case results <- queryResult{response, err, transport}:
+			case <-returned:
+			}
+		}()
+	}
+	var (
+		fallbackResponse  *mDNS.Msg
+		fallbackTransport adapter.DNSTransport
+		hasFallback       bool
+		errorsList        []error
+		allRejected       = true
+		allRejectedOnly   = true
+	)
+	for i := 0; i < len(transports); i++ {
+		select {
+		case <-ctx.Done():
+			if hasFallback {
+				return fallbackResponse, fallbackTransport, nil
+			}
+			return nil, nil, ctx.Err()
+		case result := <-results:
+			if result.err == nil {
+				// Prefer the first NOERROR response. (Avoid using NXDOMAIN/SERVFAIL etc when a valid answer exists.)
+				if result.response != nil {
+					if !hasFallback {
+						fallbackResponse = result.response
+						fallbackTransport = result.transport
+						hasFallback = true
+					}
+					if result.response.Rcode == mDNS.RcodeSuccess {
+						queryCancel()
+						return result.response, result.transport, nil
+					}
+				}
+				continue
+			}
+			errorsList = append(errorsList, result.err)
+			if errors.Is(result.err, ErrResponseRejectedCached) {
+				// keep allRejectedOnly
+			} else if errors.Is(result.err, ErrResponseRejected) {
+				allRejectedOnly = false
+			} else {
+				allRejected = false
+				allRejectedOnly = false
+			}
+		}
+	}
+	if hasFallback {
+		return fallbackResponse, fallbackTransport, nil
+	}
+	if allRejectedOnly {
+		return nil, nil, ErrResponseRejectedCached
+	}
+	if allRejected {
+		return nil, nil, ErrResponseRejected
+	}
+	return nil, nil, E.Errors(errorsList...)
+}
+
+func (r *Router) lookupRacer(ctx context.Context, transports []adapter.DNSTransport, domain string, options adapter.DNSQueryOptions, rule adapter.DNSRule, withAddressLimit bool) ([]netip.Addr, error) {
+	returned := make(chan struct{})
+	defer close(returned)
+	type queryResult struct {
+		addrs []netip.Addr
+		err   error
+	}
+	results := make(chan queryResult)
+	queryCtx, queryCancel := context.WithCancel(ctx)
+	defer queryCancel()
+	for _, transport := range transports {
+		transport := transport
+		go func() {
+			perQueryCtx := adapter.OverrideContext(queryCtx)
+			var responseCheck func(responseAddrs []netip.Addr) bool
+			if withAddressLimit && rule != nil {
+				metadata := adapter.ContextFrom(perQueryCtx)
+				if metadata != nil {
+					baseMetadata := *metadata
+					responseCheck = func(responseAddrs []netip.Addr) bool {
+						md := baseMetadata
+						md.ResetRuleCache()
+						md.DestinationAddresses = responseAddrs
+						return rule.MatchAddressLimit(&md)
+					}
+				}
+			}
+			addrs, err := r.client.Lookup(perQueryCtx, transport, domain, options, responseCheck)
+			if err == nil && len(addrs) == 0 {
+				err = E.New("empty result")
+			}
+			select {
+			case results <- queryResult{addrs, err}:
+			case <-returned:
+			}
+		}()
+	}
+	var (
+		fallbackAddrs []netip.Addr
+		fallbackErr   error
+		hasFallback   bool
+		errorsList    []error
+	)
+	for i := 0; i < len(transports); i++ {
+		select {
+		case <-ctx.Done():
+			if hasFallback {
+				return fallbackAddrs, fallbackErr
+			}
+			return nil, ctx.Err()
+		case result := <-results:
+			if !hasFallback {
+				fallbackAddrs = result.addrs
+				fallbackErr = result.err
+				hasFallback = true
+			}
+			if result.err == nil {
+				queryCancel()
+				return result.addrs, nil
+			}
+			errorsList = append(errorsList, result.err)
+		}
+	}
+	if hasFallback {
+		return fallbackAddrs, fallbackErr
+	}
+	return nil, E.Errors(errorsList...)
 }
 
 func isAddressQuery(message *mDNS.Msg) bool {

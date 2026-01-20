@@ -178,11 +178,15 @@ func (r *RouteOptionsActionOptions) UnmarshalJSON(data []byte) error {
 }
 
 type DNSRouteActionOptions struct {
-	Server       string                `json:"server,omitempty"`
-	Strategy     DomainStrategy        `json:"strategy,omitempty"`
-	DisableCache bool                  `json:"disable_cache,omitempty"`
-	RewriteTTL   *uint32               `json:"rewrite_ttl,omitempty"`
-	ClientSubnet *badoption.Prefixable `json:"client_subnet,omitempty"`
+	Server            badoption.Listable[string] `json:"server,omitempty"`
+	FallbackDNS       badoption.Listable[string] `json:"fallback_dns,omitempty"`
+	UpstreamTimeoutMS uint32                     `json:"upstream_timeout_ms,omitempty"`
+	FallbackTimeoutMS uint32                     `json:"fallback_timeout_ms,omitempty"`
+	FallbackGraceMS   uint32                     `json:"fallback_grace_ms,omitempty"`
+	Strategy          DomainStrategy             `json:"strategy,omitempty"`
+	DisableCache      bool                       `json:"disable_cache,omitempty"`
+	RewriteTTL        *uint32                    `json:"rewrite_ttl,omitempty"`
+	ClientSubnet      *badoption.Prefixable      `json:"client_subnet,omitempty"`
 }
 
 type _DNSRouteOptionsActionOptions struct {
@@ -302,6 +306,7 @@ type RouteActionResolve struct {
 	DisableCache bool                  `json:"disable_cache,omitempty"`
 	RewriteTTL   *uint32               `json:"rewrite_ttl,omitempty"`
 	ClientSubnet *badoption.Prefixable `json:"client_subnet,omitempty"`
+	RouteOnly    bool                  `json:"route_only,omitempty"`
 }
 
 type DNSRouteActionPredefined struct {

@@ -21,7 +21,7 @@ func NewDNSRule(ctx context.Context, logger log.ContextLogger, options option.DN
 		}
 		switch options.DefaultOptions.Action {
 		case "", C.RuleActionTypeRoute:
-			if options.DefaultOptions.RouteOptions.Server == "" && checkServer {
+			if len(options.DefaultOptions.RouteOptions.Server) == 0 && checkServer {
 				return nil, E.New("missing server field")
 			}
 		}
@@ -32,7 +32,7 @@ func NewDNSRule(ctx context.Context, logger log.ContextLogger, options option.DN
 		}
 		switch options.LogicalOptions.Action {
 		case "", C.RuleActionTypeRoute:
-			if options.LogicalOptions.RouteOptions.Server == "" && checkServer {
+			if len(options.LogicalOptions.RouteOptions.Server) == 0 && checkServer {
 				return nil, E.New("missing server field")
 			}
 		}

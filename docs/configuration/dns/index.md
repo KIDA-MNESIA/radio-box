@@ -21,6 +21,9 @@ icon: material/alert-decagram
     "rules": [],
     "final": "",
     "strategy": "",
+    "upstream_timeout_ms": 0,
+    "fallback_timeout_ms": 0,
+    "fallback_grace_ms": 0,
     "disable_cache": false,
     "disable_expire": false,
     "independent_cache": false,
@@ -52,6 +55,24 @@ The first server will be used if empty.
 Default domain strategy for resolving the domain names.
 
 One of `prefer_ipv4` `prefer_ipv6` `ipv4_only` `ipv6_only`.
+
+#### upstream_timeout_ms
+
+Global upstream DNS query timeout in milliseconds.
+
+`0` uses the default timeout.
+
+#### fallback_timeout_ms
+
+Global fallback DNS query timeout in milliseconds.
+
+`0` uses `dns.upstream_timeout_ms`.
+
+#### fallback_grace_ms
+
+Grace window in milliseconds for primary servers after fallback servers are started.
+
+`0` disables grace window.
 
 #### disable_cache
 

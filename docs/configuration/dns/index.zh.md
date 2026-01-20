@@ -21,6 +21,9 @@ icon: material/alert-decagram
     "rules": [],
     "final": "",
     "strategy": "",
+    "upstream_timeout_ms": 0,
+    "fallback_timeout_ms": 0,
+    "fallback_grace_ms": 0,
     "disable_cache": false,
     "disable_expire": false,
     "independent_cache": false,
@@ -51,6 +54,24 @@ icon: material/alert-decagram
 默认解析域名策略。
 
 可选值: `prefer_ipv4` `prefer_ipv6` `ipv4_only` `ipv6_only`。
+
+#### upstream_timeout_ms
+
+全局上游 DNS 查询超时时间（毫秒）。
+
+`0` 使用默认超时时间。
+
+#### fallback_timeout_ms
+
+全局后备 DNS 查询超时时间（毫秒）。
+
+`0` 将使用 `dns.upstream_timeout_ms`。
+
+#### fallback_grace_ms
+
+在启动后备 DNS 查询之后，仍允许主服务器继续等待的宽限窗口（毫秒）。
+
+`0` 禁用宽限窗口。
 
 #### disable_cache
 

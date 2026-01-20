@@ -61,8 +61,20 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		remoteConn net.Conn
 		err        error
 	)
-	if len(metadata.DestinationAddresses) > 0 || metadata.Destination.IsIP() {
-		remoteConn, err = dialer.DialSerialNetwork(ctx, this, N.NetworkTCP, metadata.Destination, metadata.DestinationAddresses, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
+	if len(metadata.DestinationAddresses) > 0 {
+		if metadata.ResolveRouteOnly {
+			// Keep the original domain destination for outbounds.
+			// Only use the resolved addresses for dialers that can accept them separately.
+			if _, ok := this.(dialer.ParallelNetworkDialer); ok {
+				remoteConn, err = dialer.DialSerialNetwork(ctx, this, N.NetworkTCP, metadata.Destination, metadata.DestinationAddresses, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
+			} else {
+				remoteConn, err = this.DialContext(ctx, N.NetworkTCP, metadata.Destination)
+			}
+		} else {
+			remoteConn, err = dialer.DialSerialNetwork(ctx, this, N.NetworkTCP, metadata.Destination, metadata.DestinationAddresses, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
+		}
+	} else if metadata.Destination.IsIP() {
+		remoteConn, err = dialer.DialSerialNetwork(ctx, this, N.NetworkTCP, metadata.Destination, nil, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
 	} else {
 		remoteConn, err = this.DialContext(ctx, N.NetworkTCP, metadata.Destination)
 	}
@@ -117,7 +129,15 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 	if metadata.UDPConnect {
 		parallelDialer, isParallelDialer := this.(dialer.ParallelInterfaceDialer)
 		if len(metadata.DestinationAddresses) > 0 {
-			if isParallelDialer {
+			if metadata.ResolveRouteOnly {
+				// Keep the original domain destination for outbounds.
+				// Only use the resolved addresses for dialers that can accept them separately.
+				if _, ok := this.(dialer.ParallelNetworkDialer); ok {
+					remoteConn, err = dialer.DialSerialNetwork(ctx, this, N.NetworkUDP, metadata.Destination, metadata.DestinationAddresses, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
+				} else {
+					remoteConn, err = this.DialContext(ctx, N.NetworkUDP, metadata.Destination)
+				}
+			} else if isParallelDialer {
 				remoteConn, err = dialer.DialSerialNetwork(ctx, parallelDialer, N.NetworkUDP, metadata.Destination, metadata.DestinationAddresses, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
 			} else {
 				remoteConn, err = N.DialSerial(ctx, this, N.NetworkUDP, metadata.Destination, metadata.DestinationAddresses)
@@ -154,7 +174,17 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 		}
 	} else {
 		if len(metadata.DestinationAddresses) > 0 {
-			remotePacketConn, destinationAddress, err = dialer.ListenSerialNetworkPacket(ctx, this, metadata.Destination, metadata.DestinationAddresses, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
+			if metadata.ResolveRouteOnly {
+				// Keep the original domain destination for outbounds.
+				// Only use the resolved addresses for dialers that can accept them separately.
+				if _, ok := this.(dialer.ParallelNetworkDialer); ok {
+					remotePacketConn, destinationAddress, err = dialer.ListenSerialNetworkPacket(ctx, this, metadata.Destination, metadata.DestinationAddresses, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
+				} else {
+					remotePacketConn, err = this.ListenPacket(ctx, metadata.Destination)
+				}
+			} else {
+				remotePacketConn, destinationAddress, err = dialer.ListenSerialNetworkPacket(ctx, this, metadata.Destination, metadata.DestinationAddresses, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
+			}
 		} else {
 			remotePacketConn, err = this.ListenPacket(ctx, metadata.Destination)
 		}

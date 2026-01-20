@@ -221,7 +221,8 @@ UDP 连接超时时间。
   "strategy": "",
   "disable_cache": false,
   "rewrite_ttl": null,
-  "client_subnet": null
+  "client_subnet": null,
+  "route_only": false
 }
 ```
 
@@ -257,4 +258,10 @@ DNS 解析策略，可用值有：`prefer_ipv4`、`prefer_ipv6`、`ipv4_only`、
 
 如果值是 IP 地址而不是前缀，则会自动附加 `/32` 或 `/128`。
 
-将覆盖 `dns.client_subnet`.
+将覆盖 `dns.client_subnet`。
+
+#### route_only
+
+如果启用，将仍然以 `Domain:Port` 的形式将目标发送给出站。
+
+解析得到的 IP 地址仅用于路由判定（例如 `ip_cidr`）。

@@ -1,11 +1,12 @@
 name: Mark stale issues and pull requests
 
+# Disabled: requested to stop running stale workflow
 on:
-  schedule:
-    - cron: "30 1 * * *"
+  workflow_dispatch:
 
 jobs:
   stale:
+    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/stale@v9

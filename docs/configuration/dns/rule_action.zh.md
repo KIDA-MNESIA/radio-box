@@ -15,6 +15,10 @@ icon: material/new-box
 {
   "action": "route", // 默认
   "server": "",
+  "fallback_dns": "",
+  "upstream_timeout_ms": 0,
+  "fallback_timeout_ms": 0,
+  "fallback_grace_ms": 0,
   "strategy": "",
   "disable_cache": false,
   "rewrite_ttl": null,
@@ -28,7 +32,41 @@ icon: material/new-box
 
 ==必填==
 
-目标 DNS 服务器的标签。
+目标 DNS 服务器的标签（字符串）或标签列表（数组）。
+
+当配置为数组时，将并发向所有服务器发起 DNS 查询。
+
+- 优先使用第一个返回 `NOERROR` 的响应。
+- 如果全部服务器都返回非 `NOERROR`（例如 `SERVFAIL`/`NXDOMAIN`），则使用最先返回的那个响应。
+
+#### upstream_timeout_ms
+
+该规则动作的上游 DNS 查询超时时间（毫秒）。
+
+将覆盖 `dns.upstream_timeout_ms`。
+
+#### fallback_timeout_ms
+
+该规则动作的后备 DNS 查询超时时间（毫秒）。
+
+将覆盖 `dns.fallback_timeout_ms`；如果两者均为 `0`，则使用 `upstream_timeout_ms`。
+
+#### fallback_grace_ms
+
+在启动后备 DNS 查询之后，仍允许主服务器继续等待的宽限窗口（毫秒）。
+
+将覆盖 `dns.fallback_grace_ms`。
+
+#### fallback_dns
+
+后备 DNS 服务器的标签（字符串）或标签列表（数组）。
+
+当上游超时触发时，将启动后备 DNS 查询。
+
+- 主服务器仍会继续运行额外的 `fallback_grace_ms`。
+- 后备 DNS 将并发查询。
+
+如果未配置 `fallback_dns`，则在超时触发时将立刻返回（不再继续等待）。
 
 #### strategy
 

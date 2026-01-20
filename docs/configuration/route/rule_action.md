@@ -229,7 +229,8 @@ Timeout for sniffing.
   "strategy": "",
   "disable_cache": false,
   "rewrite_ttl": null,
-  "client_subnet": null
+  "client_subnet": null,
+  "route_only": false
 }
 ```
 
@@ -266,3 +267,9 @@ Append a `edns0-subnet` OPT extra record with the specified IP prefix to every q
 If value is an IP address instead of prefix, `/32` or `/128` will be appended automatically.
 
 Will overrides `dns.client_subnet`.
+
+#### route_only
+
+If enabled, the destination will still be sent to outbounds as `Domain:Port`.
+
+Resolved IP addresses will only be used for routing decisions (e.g. `ip_cidr`).

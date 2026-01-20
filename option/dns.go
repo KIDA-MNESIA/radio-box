@@ -94,7 +94,11 @@ func rewriteRcodeAction(rcodeMap map[string]int, ruleAction *DNSRuleAction) {
 	if ruleAction.Action != C.RuleActionTypeRoute {
 		return
 	}
-	rcode, loaded := rcodeMap[ruleAction.RouteOptions.Server]
+	// Only rewrite when there is exactly one target server.
+	if len(ruleAction.RouteOptions.Server) != 1 {
+		return
+	}
+	rcode, loaded := rcodeMap[ruleAction.RouteOptions.Server[0]]
 	if !loaded {
 		return
 	}
@@ -103,12 +107,15 @@ func rewriteRcodeAction(rcodeMap map[string]int, ruleAction *DNSRuleAction) {
 }
 
 type DNSClientOptions struct {
-	Strategy         DomainStrategy        `json:"strategy,omitempty"`
-	DisableCache     bool                  `json:"disable_cache,omitempty"`
-	DisableExpire    bool                  `json:"disable_expire,omitempty"`
-	IndependentCache bool                  `json:"independent_cache,omitempty"`
-	CacheCapacity    uint32                `json:"cache_capacity,omitempty"`
-	ClientSubnet     *badoption.Prefixable `json:"client_subnet,omitempty"`
+	Strategy          DomainStrategy        `json:"strategy,omitempty"`
+	UpstreamTimeoutMS uint32                `json:"upstream_timeout_ms,omitempty"`
+	FallbackTimeoutMS uint32                `json:"fallback_timeout_ms,omitempty"`
+	FallbackGraceMS   uint32                `json:"fallback_grace_ms,omitempty"`
+	DisableCache      bool                  `json:"disable_cache,omitempty"`
+	DisableExpire     bool                  `json:"disable_expire,omitempty"`
+	IndependentCache  bool                  `json:"independent_cache,omitempty"`
+	CacheCapacity     uint32                `json:"cache_capacity,omitempty"`
+	ClientSubnet      *badoption.Prefixable `json:"client_subnet,omitempty"`
 }
 
 type LegacyDNSFakeIPOptions struct {

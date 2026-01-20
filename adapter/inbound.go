@@ -83,11 +83,14 @@ type InboundContext struct {
 	FallbackDelay       time.Duration
 
 	DestinationAddresses []netip.Addr
-	SourceGeoIPCode      string
-	GeoIPCode            string
-	ProcessInfo          *process.Info
-	QueryType            uint16
-	FakeIP               bool
+	// If true, DestinationAddresses is only used for routing decisions and must not
+	// be used to replace the destination passed to outbounds.
+	ResolveRouteOnly bool
+	SourceGeoIPCode  string
+	GeoIPCode        string
+	ProcessInfo      *process.Info
+	QueryType        uint16
+	FakeIP           bool
 
 	// rule cache
 

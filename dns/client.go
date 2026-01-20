@@ -43,7 +43,7 @@ type Client struct {
 	cache              freelru.Cache[dns.Question, *dns.Msg]
 	cacheLock          compatible.Map[dns.Question, chan struct{}]
 	transportCache     freelru.Cache[transportCacheKey, *dns.Msg]
-	transportCacheLock compatible.Map[dns.Question, chan struct{}]
+	transportCacheLock compatible.Map[transportCacheKey, chan struct{}]
 }
 
 type ClientOptions struct {
@@ -152,12 +152,13 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
 				}()
 			}
 		} else if c.transportCache != nil {
-			cond, loaded := c.transportCacheLock.LoadOrStore(question, make(chan struct{}))
+			key := transportCacheKey{Question: question, transportTag: transport.Tag()}
+			cond, loaded := c.transportCacheLock.LoadOrStore(key, make(chan struct{}))
 			if loaded {
 				<-cond
 			} else {
 				defer func() {
-					c.transportCacheLock.Delete(question)
+					c.transportCacheLock.Delete(key)
 					close(cond)
 				}()
 			}
@@ -182,9 +183,14 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
 			return nil, ErrResponseRejectedCached
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	var cancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		ctx, cancel = context.WithTimeout(ctx, c.timeout)
+	}
 	response, err := transport.Exchange(ctx, message)
-	cancel()
+	if cancel != nil {
+		cancel()
+	}
 	if err != nil {
 		var rcodeError RcodeError
 		if errors.As(err, &rcodeError) {

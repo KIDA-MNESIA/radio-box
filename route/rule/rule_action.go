@@ -98,6 +98,7 @@ func NewRuleAction(ctx context.Context, logger logger.ContextLogger, action opti
 			DisableCache: action.ResolveOptions.DisableCache,
 			RewriteTTL:   action.ResolveOptions.RewriteTTL,
 			ClientSubnet: action.ResolveOptions.ClientSubnet.Build(netip.Prefix{}),
+			RouteOnly:    action.ResolveOptions.RouteOnly,
 		}, nil
 	default:
 		panic(F.ToString("unknown rule action: ", action.Action))
@@ -110,7 +111,11 @@ func NewDNSRuleAction(logger logger.ContextLogger, action option.DNSRuleAction) 
 		return nil
 	case C.RuleActionTypeRoute:
 		return &RuleActionDNSRoute{
-			Server: action.RouteOptions.Server,
+			Servers:         []string(action.RouteOptions.Server),
+			FallbackServers: []string(action.RouteOptions.FallbackDNS),
+			UpstreamTimeout: time.Duration(action.RouteOptions.UpstreamTimeoutMS) * time.Millisecond,
+			FallbackTimeout: time.Duration(action.RouteOptions.FallbackTimeoutMS) * time.Millisecond,
+			FallbackGrace:   time.Duration(action.RouteOptions.FallbackGraceMS) * time.Millisecond,
 			RuleActionDNSRouteOptions: RuleActionDNSRouteOptions{
 				Strategy:     C.DomainStrategy(action.RouteOptions.Strategy),
 				DisableCache: action.RouteOptions.DisableCache,
@@ -224,7 +229,11 @@ func (r *RuleActionRouteOptions) Descriptions() []string {
 }
 
 type RuleActionDNSRoute struct {
-	Server string
+	Servers         []string
+	FallbackServers []string
+	UpstreamTimeout time.Duration
+	FallbackTimeout time.Duration
+	FallbackGrace   time.Duration
 	RuleActionDNSRouteOptions
 }
 
@@ -234,7 +243,25 @@ func (r *RuleActionDNSRoute) Type() string {
 
 func (r *RuleActionDNSRoute) String() string {
 	var descriptions []string
-	descriptions = append(descriptions, r.Server)
+	if len(r.Servers) == 1 {
+		descriptions = append(descriptions, r.Servers[0])
+	} else if len(r.Servers) > 1 {
+		descriptions = append(descriptions, F.ToString("{", strings.Join(r.Servers, "|"), "}"))
+	}
+	if len(r.FallbackServers) == 1 {
+		descriptions = append(descriptions, F.ToString("fallback=", r.FallbackServers[0]))
+	} else if len(r.FallbackServers) > 1 {
+		descriptions = append(descriptions, F.ToString("fallback={", strings.Join(r.FallbackServers, "|"), "}"))
+	}
+	if r.UpstreamTimeout > 0 {
+		descriptions = append(descriptions, F.ToString("upstream-timeout=", r.UpstreamTimeout.String()))
+	}
+	if r.FallbackTimeout > 0 {
+		descriptions = append(descriptions, F.ToString("fallback-timeout=", r.FallbackTimeout.String()))
+	}
+	if r.FallbackGrace > 0 {
+		descriptions = append(descriptions, F.ToString("fallback-grace=", r.FallbackGrace.String()))
+	}
 	if r.DisableCache {
 		descriptions = append(descriptions, "disable-cache")
 	}
@@ -424,6 +451,7 @@ type RuleActionResolve struct {
 	DisableCache bool
 	RewriteTTL   *uint32
 	ClientSubnet netip.Prefix
+	RouteOnly    bool
 }
 
 func (r *RuleActionResolve) Type() string {
@@ -446,6 +474,9 @@ func (r *RuleActionResolve) String() string {
 	}
 	if r.ClientSubnet.IsValid() {
 		options = append(options, F.ToString("client_subnet=", r.ClientSubnet))
+	}
+	if r.RouteOnly {
+		options = append(options, "route_only")
 	}
 	if len(options) == 0 {
 		return "resolve"
