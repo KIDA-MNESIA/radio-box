@@ -1,13 +1,16 @@
 name: Publish Docker Images
 
 on:
-  release:
-    types:
-      - published
   workflow_dispatch:
     inputs:
       tag:
-        description: "The tag version you want to build"
+        description: "Release tag (e.g. v1.2.3)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
 
 env:
   REGISTRY_IMAGE: ghcr.io/sagernet/sing-box
@@ -20,28 +23,11 @@ jobs:
       matrix:
         platform:
           - linux/amd64
-          - linux/arm/v6
-          - linux/arm/v7
-          - linux/arm64
-          - linux/386
-          - linux/ppc64le
-          - linux/riscv64
-          - linux/s390x
+          # Other platforms are temporarily disabled.
     steps:
-      - name: Get commit to build
-        id: ref
-        run: |-
-          if [[ -z "${{ github.event.inputs.tag }}" ]]; then
-            ref="${{ github.ref_name }}"
-          else
-            ref="${{ github.event.inputs.tag }}"
-          fi
-          echo "ref=$ref"
-          echo "ref=$ref" >> $GITHUB_OUTPUT
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
         with:
-          ref: ${{ steps.ref.outputs.ref }}
           fetch-depth: 0
       - name: Prepare
         run: |
@@ -89,17 +75,13 @@ jobs:
     needs:
       - build
     steps:
-      - name: Get commit to build
+      - name: Get tag to publish
         id: ref
         run: |-
-          if [[ -z "${{ github.event.inputs.tag }}" ]]; then
-            ref="${{ github.ref_name }}"
-          else
-            ref="${{ github.event.inputs.tag }}"
-          fi
-          echo "ref=$ref"
-          echo "ref=$ref" >> $GITHUB_OUTPUT
-          if [[ $ref == *"-"* ]]; then
+          tag='${{ inputs.tag }}'
+          echo "tag=$tag"
+          echo "tag=$tag" >> $GITHUB_OUTPUT
+          if [[ $tag == *"-"* ]]; then
             latest=latest-beta
           else
             latest=latest
@@ -125,9 +107,9 @@ jobs:
         run: |
           docker buildx imagetools create \
             -t "${{ env.REGISTRY_IMAGE }}:${{ steps.ref.outputs.latest }}" \
-            -t "${{ env.REGISTRY_IMAGE }}:${{ steps.ref.outputs.ref }}" \
+            -t "${{ env.REGISTRY_IMAGE }}:${{ steps.ref.outputs.tag }}" \
             $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
       - name: Inspect image
         run: |
           docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.ref.outputs.latest }}
-          docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.ref.outputs.ref }}
+          docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.ref.outputs.tag }}

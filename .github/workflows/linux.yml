@@ -4,15 +4,10 @@ name: Build Linux Packages
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version name"
+      tag:
+        description: "Release tag (e.g. v1.2.3)"
         required: true
         type: string
-      forceBeta:
-        description: "Force beta"
-        required: false
-        type: boolean
-        default: false
 
 jobs:
   calculate_version:
@@ -29,12 +24,14 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: ^1.25.6
-      - name: Check input version
+          go-version-file: go.mod
+      - name: Check input tag
         if: github.event_name == 'workflow_dispatch'
         run: |-
-          echo "version=${{ inputs.version }}"
-          echo "version=${{ inputs.version }}" >> "$GITHUB_ENV"
+          tag='${{ inputs.tag }}'
+          version="${tag#v}"
+          echo "version=$version"
+          echo "version=$version" >> "$GITHUB_ENV"
       - name: Calculate version
         if: github.event_name != 'workflow_dispatch'
         run: |-
@@ -71,7 +68,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: ^1.25.6
+          go-version-file: go.mod
       - name: Setup Android NDK
         if: matrix.os == 'android'
         uses: nttld/setup-ndk@v1
@@ -104,11 +101,11 @@ jobs:
         run: |-
           TZ=UTC touch -t '197001010000' dist/sing-box
       - name: Set name
-        if: (! contains(needs.calculate_version.outputs.version, '-')) && !inputs.forceBeta
+        if: (! contains(needs.calculate_version.outputs.version, '-'))
         run: |-
           echo "NAME=sing-box" >> "$GITHUB_ENV"
       - name: Set beta name
-        if: contains(needs.calculate_version.outputs.version, '-') || inputs.forceBeta
+        if: contains(needs.calculate_version.outputs.version, '-')
         run: |-
           echo "NAME=sing-box-beta" >> "$GITHUB_ENV"
       - name: Set version
