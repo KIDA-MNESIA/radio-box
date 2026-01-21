@@ -475,7 +475,8 @@ jobs:
         run: |-
           set -xeuo pipefail
           export PATH="$PATH:$HOME/go/bin"
-          args=(--replace -p 5)
+          # Ensure Release title is exactly the input tag, and Release notes are empty.
+          args=(--replace -p 5 -n "${TAG}" -b "")
           if [[ "${TAG}" == *"-"* ]]; then
             args+=(--prerelease)
           fi
