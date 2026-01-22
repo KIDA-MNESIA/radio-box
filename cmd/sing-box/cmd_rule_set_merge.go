@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sagernet/sing-box/common/jsonc"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -60,7 +61,7 @@ func readRuleSetAt(path string) (*RuleSetEntry, error) {
 	if err != nil {
 		return nil, E.Cause(err, "read config at ", path)
 	}
-	options, err := json.UnmarshalExtendedContext[option.PlainRuleSetCompat](globalCtx, configContent)
+	options, err := jsonc.UnmarshalExtendedContext[option.PlainRuleSetCompat](globalCtx, configContent)
 	if err != nil {
 		return nil, E.Cause(err, "decode config at ", path)
 	}
@@ -86,7 +87,11 @@ func readRuleSet() ([]*RuleSetEntry, error) {
 			return nil, E.Cause(err, "read rule-set directory at ", directory)
 		}
 		for _, entry := range entries {
-			if !strings.HasSuffix(entry.Name(), ".json") || entry.IsDir() {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if !strings.HasSuffix(name, ".json") && !strings.HasSuffix(name, ".jsonc") {
 				continue
 			}
 			optionsEntry, err := readRuleSetAt(filepath.Join(directory, entry.Name()))

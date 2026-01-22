@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/sagernet/sing-box/common/jsonc"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -50,7 +51,7 @@ func formatRuleSet(sourcePath string) error {
 	if err != nil {
 		return err
 	}
-	plainRuleSet, err := json.UnmarshalExtended[option.PlainRuleSetCompat](content)
+	plainRuleSet, err := jsonc.UnmarshalExtended[option.PlainRuleSetCompat](content)
 	if err != nil {
 		return err
 	}

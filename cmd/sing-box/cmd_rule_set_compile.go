@@ -3,12 +3,13 @@ package main
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/sagernet/sing-box/common/jsonc"
 	"github.com/sagernet/sing-box/common/srs"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/common/json"
 
 	"github.com/spf13/cobra"
 )
@@ -51,15 +52,17 @@ func compileRuleSet(sourcePath string) error {
 	if err != nil {
 		return err
 	}
-	plainRuleSet, err := json.UnmarshalExtended[option.PlainRuleSetCompat](content)
+	plainRuleSet, err := jsonc.UnmarshalExtended[option.PlainRuleSetCompat](content)
 	if err != nil {
 		return err
 	}
 	var outputPath string
 	if flagRuleSetCompileOutput == flagRuleSetCompileDefaultOutput {
-		if strings.HasSuffix(sourcePath, ".json") {
-			outputPath = sourcePath[:len(sourcePath)-5] + ".srs"
-		} else {
+		ext := filepath.Ext(sourcePath)
+		switch ext {
+		case ".json", ".jsonc":
+			outputPath = strings.TrimSuffix(sourcePath, ext) + ".srs"
+		default:
 			outputPath = sourcePath + ".srs"
 		}
 	} else {
