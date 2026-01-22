@@ -244,9 +244,9 @@
 
 同时，未启用 `independent_cache` 时，带 ECS 的查询不会进入全局缓存，以避免跨子网错误复用。
 
-### 4. 路由 resolve 动作的 `route_only`
+### 4. 路由 resolve 动作增强（`route_only` / `fallback_to_final`）
 
-本版本为 `route.rules` 中的 `resolve` 动作新增 `route_only` 选项，用于控制 **DNS 解析结果是否只用于“路由判定”，而不改写实际出站目标**。
+本版本为 `route.rules` 中的 `resolve` 动作新增 `route_only` 与 `fallback_to_final` 选项，用于控制 **DNS 解析结果是否只用于“路由判定”，以及解析失败时是否回落到默认出站**。
 
 #### 4.1 与默认行为的对比
 
@@ -296,6 +296,9 @@
 |------|------|--------|------|
 | `action` | string | （必填） | 固定为 `"resolve"`，表示执行一次 DNS 解析以辅助路由。 |
 | `route_only` | bool | `false` | `false`：解析后将目的地址改写为 `IP:Port`；`true`：解析结果仅用于路由判定，不改写目的地址，出站仍为 `Domain:Port`。 |
+| `fallback_to_final` | bool | `false` | 当本次 `resolve` 的 DNS 解析失败时，停止继续匹配后续路由规则，并使用默认出站（即 `route.final`；若未设置则为默认 DIRECT）。 |
+
+> 注：`fallback_to_final` 的设计受 Surge 的 `dns-failed` 行为启发。
 
 #### 4.5 配置示例（不同场景对比）
 
@@ -362,6 +365,31 @@
   ```
 
   说明：只对指定域名族启用“仅路由判定”的 resolve，避免对所有流量引入额外的解析开销。
+
+- **示例 4：解析失败回落到默认出站（`fallback_to_final: true`）**
+
+  ```json
+  {
+    "route": {
+      "final": "proxy",
+      "rules": [
+        {
+          "action": "resolve",
+          "fallback_to_final": true
+        },
+        {
+          "ip_cidr": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
+          "outbound": "direct"
+        },
+        {
+          "outbound": "proxy"
+        }
+      ]
+    }
+  }
+  ```
+
+  说明：当 `resolve` 解析失败时，将停止继续匹配后续规则，直接使用默认出站（即 `route.final` 对应的出站；未设置 `route.final` 时为默认 DIRECT 出站）。
 
 ## 许可证
 

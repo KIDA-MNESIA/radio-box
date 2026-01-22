@@ -470,8 +470,15 @@ match:
 				break match
 			}
 		case *R.RuleActionResolve:
-			fatalErr = r.actionResolve(ctx, metadata, action)
-			if fatalErr != nil {
+			err := r.actionResolve(ctx, metadata, action)
+			if err != nil {
+				if action.FallbackToFinal && ctx.Err() == nil && !strings.Contains(err.Error(), "DNS server not found:") {
+					r.logger.DebugContext(ctx, "resolve failed and fallback_to_final enabled, fallback to default outbound: ", err)
+					metadata.DestinationAddresses = nil
+					metadata.ResolveRouteOnly = false
+					return
+				}
+				fatalErr = err
 				return
 			}
 		}

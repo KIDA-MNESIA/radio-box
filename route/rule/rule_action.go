@@ -93,12 +93,13 @@ func NewRuleAction(ctx context.Context, logger logger.ContextLogger, action opti
 		return sniffAction, sniffAction.build()
 	case C.RuleActionTypeResolve:
 		return &RuleActionResolve{
-			Server:       action.ResolveOptions.Server,
-			Strategy:     C.DomainStrategy(action.ResolveOptions.Strategy),
-			DisableCache: action.ResolveOptions.DisableCache,
-			RewriteTTL:   action.ResolveOptions.RewriteTTL,
-			ClientSubnet: action.ResolveOptions.ClientSubnet.Build(netip.Prefix{}),
-			RouteOnly:    action.ResolveOptions.RouteOnly,
+			Server:          action.ResolveOptions.Server,
+			Strategy:        C.DomainStrategy(action.ResolveOptions.Strategy),
+			DisableCache:    action.ResolveOptions.DisableCache,
+			RewriteTTL:      action.ResolveOptions.RewriteTTL,
+			ClientSubnet:    action.ResolveOptions.ClientSubnet.Build(netip.Prefix{}),
+			RouteOnly:       action.ResolveOptions.RouteOnly,
+			FallbackToFinal: action.ResolveOptions.FallbackToFinal,
 		}, nil
 	default:
 		panic(F.ToString("unknown rule action: ", action.Action))
@@ -453,12 +454,13 @@ func (r *RuleActionSniff) String() string {
 }
 
 type RuleActionResolve struct {
-	Server       string
-	Strategy     C.DomainStrategy
-	DisableCache bool
-	RewriteTTL   *uint32
-	ClientSubnet netip.Prefix
-	RouteOnly    bool
+	Server          string
+	Strategy        C.DomainStrategy
+	DisableCache    bool
+	RewriteTTL      *uint32
+	ClientSubnet    netip.Prefix
+	RouteOnly       bool
+	FallbackToFinal bool
 }
 
 func (r *RuleActionResolve) Type() string {
@@ -484,6 +486,9 @@ func (r *RuleActionResolve) String() string {
 	}
 	if r.RouteOnly {
 		options = append(options, "route_only")
+	}
+	if r.FallbackToFinal {
+		options = append(options, "fallback_to_final")
 	}
 	if len(options) == 0 {
 		return "resolve"
