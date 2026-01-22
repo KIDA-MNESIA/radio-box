@@ -30,6 +30,7 @@ icon: material/alert-decagram
     "cache_capacity": 0,
     "reverse_mapping": false,
     "client_subnet": "",
+    "client_subnet_from_inbound": null,
     "fakeip": {}
   }
 }
@@ -110,3 +111,16 @@ Append a `edns0-subnet` OPT extra record with the specified IP prefix to every q
 If value is an IP address instead of prefix, `/32` or `/128` will be appended automatically.
 
 Can be overrides by `servers.[].client_subnet` or `rules.[].client_subnet`.
+
+#### client_subnet_from_inbound
+
+If `client_subnet` is not configured (including `servers.[].client_subnet` / `rules.[].client_subnet` overrides), derive a prefix from the peer address of the inbound connection/session for the current DNS request, and append it as an `edns0-subnet` OPT extra record.
+
+Format:
+
+- Number: IPv4 prefix length (e.g. `24` turns `59.110.9.191` into `59.110.9.0/24`); IPv6 is disabled.
+- Object: `{"ipv4": 24, "ipv6": 56}`.
+
+Can be overridden by `servers.[].client_subnet_from_inbound` or `rules.[].client_subnet_from_inbound`.
+
+Lower priority than `client_subnet`.

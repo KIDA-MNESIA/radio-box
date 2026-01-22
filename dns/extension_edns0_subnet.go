@@ -55,3 +55,36 @@ findExists:
 	subnetOption.Address = clientSubnet.Addr().AsSlice()
 	return message
 }
+
+func ExtractClientSubnet(message *dns.Msg) (netip.Prefix, bool) {
+	edns0Opt := message.IsEdns0()
+	if edns0Opt == nil {
+		return netip.Prefix{}, false
+	}
+	for _, opt := range edns0Opt.Option {
+		subnet, isSubnet := opt.(*dns.EDNS0_SUBNET)
+		if !isSubnet {
+			continue
+		}
+		bits := int(subnet.SourceNetmask)
+		switch subnet.Family {
+		case 1:
+			if bits > 32 {
+				return netip.Prefix{}, false
+			}
+			var b [4]byte
+			copy(b[:], subnet.Address)
+			return netip.PrefixFrom(netip.AddrFrom4(b), bits).Masked(), true
+		case 2:
+			if bits > 128 {
+				return netip.Prefix{}, false
+			}
+			var b [16]byte
+			copy(b[:], subnet.Address)
+			return netip.PrefixFrom(netip.AddrFrom16(b), bits).Masked(), true
+		default:
+			return netip.Prefix{}, false
+		}
+	}
+	return netip.Prefix{}, false
+}

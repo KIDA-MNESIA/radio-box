@@ -107,15 +107,48 @@ func rewriteRcodeAction(rcodeMap map[string]int, ruleAction *DNSRuleAction) {
 }
 
 type DNSClientOptions struct {
-	Strategy          DomainStrategy        `json:"strategy,omitempty"`
-	UpstreamTimeoutMS uint32                `json:"upstream_timeout_ms,omitempty"`
-	FallbackTimeoutMS uint32                `json:"fallback_timeout_ms,omitempty"`
-	FallbackGraceMS   uint32                `json:"fallback_grace_ms,omitempty"`
-	DisableCache      bool                  `json:"disable_cache,omitempty"`
-	DisableExpire     bool                  `json:"disable_expire,omitempty"`
-	IndependentCache  bool                  `json:"independent_cache,omitempty"`
-	CacheCapacity     uint32                `json:"cache_capacity,omitempty"`
-	ClientSubnet      *badoption.Prefixable `json:"client_subnet,omitempty"`
+	Strategy                DomainStrategy                  `json:"strategy,omitempty"`
+	UpstreamTimeoutMS       uint32                          `json:"upstream_timeout_ms,omitempty"`
+	FallbackTimeoutMS       uint32                          `json:"fallback_timeout_ms,omitempty"`
+	FallbackGraceMS         uint32                          `json:"fallback_grace_ms,omitempty"`
+	DisableCache            bool                            `json:"disable_cache,omitempty"`
+	DisableExpire           bool                            `json:"disable_expire,omitempty"`
+	IndependentCache        bool                            `json:"independent_cache,omitempty"`
+	CacheCapacity           uint32                          `json:"cache_capacity,omitempty"`
+	ClientSubnet            *badoption.Prefixable           `json:"client_subnet,omitempty"`
+	ClientSubnetFromInbound *ClientSubnetFromInboundOptions `json:"client_subnet_from_inbound,omitempty"`
+}
+
+type ClientSubnetFromInboundOptions struct {
+	IPv4 uint8 `json:"ipv4,omitempty"`
+	IPv6 uint8 `json:"ipv6,omitempty"`
+}
+
+func (o *ClientSubnetFromInboundOptions) UnmarshalJSON(bytes []byte) error {
+	var prefixLen int
+	if err := json.Unmarshal(bytes, &prefixLen); err == nil {
+		if prefixLen < 0 {
+			return E.New("invalid client_subnet_from_inbound: negative value")
+		}
+		if prefixLen > 32 {
+			return E.New("invalid client_subnet_from_inbound for ipv4: ", prefixLen)
+		}
+		*o = ClientSubnetFromInboundOptions{IPv4: uint8(prefixLen)}
+		return nil
+	}
+	var v ClientSubnetFromInboundOptions
+	err := json.Unmarshal(bytes, &v)
+	if err != nil {
+		return err
+	}
+	if v.IPv4 > 32 {
+		return E.New("invalid client_subnet_from_inbound.ipv4: ", v.IPv4)
+	}
+	if v.IPv6 > 128 {
+		return E.New("invalid client_subnet_from_inbound.ipv6: ", v.IPv6)
+	}
+	*o = v
+	return nil
 }
 
 type LegacyDNSFakeIPOptions struct {
@@ -128,9 +161,10 @@ type DNSTransportOptionsRegistry interface {
 	CreateOptions(transportType string) (any, bool)
 }
 type _DNSServerOptions struct {
-	Type    string `json:"type,omitempty"`
-	Tag     string `json:"tag,omitempty"`
-	Options any    `json:"-"`
+	Type                    string                          `json:"type,omitempty"`
+	Tag                     string                          `json:"tag,omitempty"`
+	ClientSubnetFromInbound *ClientSubnetFromInboundOptions `json:"client_subnet_from_inbound,omitempty"`
+	Options                 any                             `json:"-"`
 }
 
 type DNSServerOptions _DNSServerOptions

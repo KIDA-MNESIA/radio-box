@@ -22,7 +22,8 @@ icon: material/new-box
   "strategy": "",
   "disable_cache": false,
   "rewrite_ttl": null,
-  "client_subnet": null
+  "client_subnet": null,
+  "client_subnet_from_inbound": null
 }
 ```
 
@@ -92,6 +93,19 @@ icon: material/new-box
 
 将覆盖 `dns.client_subnet`.
 
+#### client_subnet_from_inbound
+
+当未设置 `client_subnet` 时，从当前 DNS 请求对应的入站连接/会话的对端地址派生一个前缀，并以 `edns0-subnet` OPT 附加记录附加到查询。
+
+格式：
+
+- 数字：作为 IPv4 前缀长度（IPv6 不生效）。
+- 对象：`{"ipv4": 24, "ipv6": 56}`。
+
+优先级低于 `client_subnet`。
+
+将覆盖 `dns.client_subnet_from_inbound`。
+
 ### route-options
 
 ```json
@@ -99,7 +113,8 @@ icon: material/new-box
   "action": "route-options",
   "disable_cache": false,
   "rewrite_ttl": null,
-  "client_subnet": null
+  "client_subnet": null,
+  "client_subnet_from_inbound": null
 }
 ```
 

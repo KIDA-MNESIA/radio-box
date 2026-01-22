@@ -158,11 +158,78 @@
 - 后备在 3 秒（从启动时计算）时截止
 - 最终使用最先返回的有效响应
 
-### 2. 路由 resolve 动作的 `route_only`
+### 2. DNS：基于入站对端地址派生 `edns0-subnet`（ECS）与缓存隔离
+
+本版本新增 `client_subnet_from_inbound` 配置项：当未配置任何显式 `client_subnet` 时，会从当前 DNS 请求对应的入站连接/会话的**对端地址**派生一个前缀，并以 `edns0-subnet` OPT 记录附加到上游查询。
+
+> 例如：对端地址为 `59.110.9.191`，当设置 `ipv4: 24` 时，会派生为 `59.110.9.0/24`。
+
+#### 2.1 全局配置
+
+在 `dns` 配置块中增加以下选项：
+
+```json
+{
+  "dns": {
+    "client_subnet_from_inbound": { "ipv4": 24, "ipv6": 56 }
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `client_subnet_from_inbound` | number \| object | 从入站对端地址派生 ECS 前缀并附加到查询。数字表示 IPv4 前缀长度（IPv6 不生效）；对象格式为 `{ "ipv4": 24, "ipv6": 56 }`。 |
+
+#### 2.2 Server 级别覆盖
+
+在 `dns.servers[].client_subnet_from_inbound` 中设置可覆盖全局配置（但仍低于 `client_subnet`）：
+
+```json
+{
+  "dns": {
+    "servers": [
+      {
+        "tag": "cf",
+        "address": "tls://1.1.1.1",
+        "client_subnet_from_inbound": 24
+      }
+    ]
+  }
+}
+```
+
+#### 2.3 规则级别覆盖（dns.rules）
+
+在 `dns.rules[]` 的 `route` / `route-options` 动作中也支持 `client_subnet_from_inbound`，优先级高于 server 级别与全局配置（但仍低于 `client_subnet`）：
+
+```json
+{
+  "dns": {
+    "rules": [
+      {
+        "domain_suffix": [".example.com"],
+        "server": "cf",
+        "client_subnet_from_inbound": { "ipv4": 24 }
+      }
+    ]
+  }
+}
+```
+
+#### 2.4 缓存行为（independent_cache）
+
+当启用 `dns.independent_cache` 时，本版本会将本次查询附带的 `edns0-subnet` 前缀作为缓存 key 的一部分。
+
+- `59.110.9.191/32` 与 `59.110.9.0/24` 会对应不同的缓存条目
+- 这可以避免不同 ECS 维度下的结果互相污染
+
+同时，未启用 `independent_cache` 时，带 ECS 的查询不会进入全局缓存，以避免跨子网错误复用。
+
+### 3. 路由 resolve 动作的 `route_only`
 
 本版本为 `route.rules` 中的 `resolve` 动作新增 `route_only` 选项，用于控制 **DNS 解析结果是否只用于“路由判定”，而不改写实际出站目标**。
 
-#### 2.1 与默认行为的对比
+#### 3.1 与默认行为的对比
 
 - **默认（`route_only: false`，或省略）**：
   - `resolve` 解析域名后，会将“实际出站目标”改写为解析得到的 `IP:Port`
@@ -174,7 +241,7 @@
   - “实际出站目标”保持为原始的 `Domain:Port`
   - 结果是：上游仍然能够拿到域名（便于记录/审计/服务端二次分流/由服务端 DNS 决定最终 IP）
 
-#### 2.2 技术原理与工作机制
+#### 3.2 技术原理与工作机制
 
 `resolve` 本质上是在路由阶段主动触发一次 DNS 解析，并将解析结果附加到当前连接/请求的路由元数据中，供后续规则进行匹配。
 
@@ -191,7 +258,7 @@
 > 注意：启用 `route_only` 并不意味着只发生一次解析。
 > 由于目的地址仍然是域名，上游（例如远端代理服务器）在建立到目标站点的连接时可能还会再次解析域名。
 
-#### 2.3 适用场景举例
+#### 3.3 适用场景举例
 
 1. **服务端需要域名做二次路由/ACL**
    - 例如：服务端按域名做白名单/黑名单、记录审计日志、或做基于域名的分流策略。
@@ -202,7 +269,7 @@
 3. **客户端用 IP 做分流，但仍让服务端决定最终解析结果**
    - 例如：客户端仅用 `ip_cidr` 将内网/私网目标直连，其余走代理；但对外网目标仍希望由服务端 DNS 做最终解析（更贴近出口网络环境）。
 
-#### 2.4 字段说明
+#### 3.4 字段说明
 
 以下字段位于 `route.rules[]` 的规则对象中，且仅在 `action: "resolve"` 时生效：
 
@@ -211,7 +278,7 @@
 | `action` | string | （必填） | 固定为 `"resolve"`，表示执行一次 DNS 解析以辅助路由。 |
 | `route_only` | bool | `false` | `false`：解析后将目的地址改写为 `IP:Port`；`true`：解析结果仅用于路由判定，不改写目的地址，出站仍为 `Domain:Port`。 |
 
-#### 2.5 配置示例（不同场景对比）
+#### 3.5 配置示例（不同场景对比）
 
 - **示例 1：默认行为（省略 `route_only`）— 解析并改写为 `IP:Port`**
 

@@ -11,6 +11,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/compatible"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
@@ -32,40 +33,43 @@ var (
 var _ adapter.DNSClient = (*Client)(nil)
 
 type Client struct {
-	timeout            time.Duration
-	disableCache       bool
-	disableExpire      bool
-	independentCache   bool
-	clientSubnet       netip.Prefix
-	rdrc               adapter.RDRCStore
-	initRDRCFunc       func() adapter.RDRCStore
-	logger             logger.ContextLogger
-	cache              freelru.Cache[dns.Question, *dns.Msg]
-	cacheLock          compatible.Map[dns.Question, chan struct{}]
-	transportCache     freelru.Cache[transportCacheKey, *dns.Msg]
-	transportCacheLock compatible.Map[transportCacheKey, chan struct{}]
+	timeout                 time.Duration
+	disableCache            bool
+	disableExpire           bool
+	independentCache        bool
+	clientSubnet            netip.Prefix
+	clientSubnetFromInbound *option.ClientSubnetFromInboundOptions
+	rdrc                    adapter.RDRCStore
+	initRDRCFunc            func() adapter.RDRCStore
+	logger                  logger.ContextLogger
+	cache                   freelru.Cache[dns.Question, *dns.Msg]
+	cacheLock               compatible.Map[dns.Question, chan struct{}]
+	transportCache          freelru.Cache[transportCacheKey, *dns.Msg]
+	transportCacheLock      compatible.Map[transportCacheKey, chan struct{}]
 }
 
 type ClientOptions struct {
-	Timeout          time.Duration
-	DisableCache     bool
-	DisableExpire    bool
-	IndependentCache bool
-	CacheCapacity    uint32
-	ClientSubnet     netip.Prefix
-	RDRC             func() adapter.RDRCStore
-	Logger           logger.ContextLogger
+	Timeout                 time.Duration
+	DisableCache            bool
+	DisableExpire           bool
+	IndependentCache        bool
+	CacheCapacity           uint32
+	ClientSubnet            netip.Prefix
+	ClientSubnetFromInbound *option.ClientSubnetFromInboundOptions
+	RDRC                    func() adapter.RDRCStore
+	Logger                  logger.ContextLogger
 }
 
 func NewClient(options ClientOptions) *Client {
 	client := &Client{
-		timeout:          options.Timeout,
-		disableCache:     options.DisableCache,
-		disableExpire:    options.DisableExpire,
-		independentCache: options.IndependentCache,
-		clientSubnet:     options.ClientSubnet,
-		initRDRCFunc:     options.RDRC,
-		logger:           options.Logger,
+		timeout:                 options.Timeout,
+		disableCache:            options.DisableCache,
+		disableExpire:           options.DisableExpire,
+		independentCache:        options.IndependentCache,
+		clientSubnet:            options.ClientSubnet,
+		clientSubnetFromInbound: options.ClientSubnetFromInbound,
+		initRDRCFunc:            options.RDRC,
+		logger:                  options.Logger,
 	}
 	if client.timeout == 0 {
 		client.timeout = C.DNSTimeout
@@ -87,6 +91,7 @@ func NewClient(options ClientOptions) *Client {
 type transportCacheKey struct {
 	dns.Question
 	transportTag string
+	clientSubnet netip.Prefix
 }
 
 func (c *Client) Start() {
@@ -109,6 +114,75 @@ func extractNegativeTTL(response *dns.Msg) (uint32, bool) {
 	return 0, false
 }
 
+func clientSubnetFromInbound(ctx context.Context, options *option.ClientSubnetFromInboundOptions) netip.Prefix {
+	if options == nil {
+		return netip.Prefix{}
+	}
+	metadata := adapter.ContextFrom(ctx)
+	if metadata == nil {
+		return netip.Prefix{}
+	}
+	addr := metadata.Source.Addr
+	if !addr.IsValid() {
+		return netip.Prefix{}
+	}
+	var prefixLen int
+	if addr.Is4() {
+		if options.IPv4 == 0 {
+			return netip.Prefix{}
+		}
+		prefixLen = int(options.IPv4)
+		if prefixLen > 32 {
+			return netip.Prefix{}
+		}
+	} else {
+		if options.IPv6 == 0 {
+			return netip.Prefix{}
+		}
+		prefixLen = int(options.IPv6)
+		if prefixLen > 128 {
+			return netip.Prefix{}
+		}
+	}
+	return netip.PrefixFrom(addr, prefixLen).Masked()
+}
+
+func (c *Client) resolveClientSubnet(ctx context.Context, options adapter.DNSQueryOptions) netip.Prefix {
+	clientSubnet := options.ClientSubnet
+	if !clientSubnet.IsValid() {
+		clientSubnet = c.clientSubnet
+	}
+	if clientSubnet.IsValid() {
+		return clientSubnet
+	}
+	fromInbound := options.ClientSubnetFromInbound
+	if fromInbound == nil {
+		fromInbound = c.clientSubnetFromInbound
+	}
+	return clientSubnetFromInbound(ctx, fromInbound)
+}
+
+func isCacheableDNSExtra(record dns.RR, independentCache bool, clientSubnet netip.Prefix) bool {
+	opt, isOPT := record.(*dns.OPT)
+	if !isOPT {
+		return false
+	}
+	if opt.Hdr.Ttl != 0 {
+		return false
+	}
+	if len(opt.Option) == 0 {
+		return true
+	}
+	if !independentCache {
+		return false
+	}
+	if len(opt.Option) != 1 {
+		return false
+	}
+	_, isSubnet := opt.Option[0].(*dns.EDNS0_SUBNET)
+	return isSubnet && clientSubnet.IsValid()
+}
+
 func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(responseAddrs []netip.Addr) bool) (*dns.Msg, error) {
 	if len(message.Question) == 0 {
 		if c.logger != nil {
@@ -123,22 +197,23 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
 		}
 		return FixedResponseStatus(message, dns.RcodeSuccess), nil
 	}
-	clientSubnet := options.ClientSubnet
-	if !clientSubnet.IsValid() {
-		clientSubnet = c.clientSubnet
-	}
+	clientSubnet := c.resolveClientSubnet(ctx, options)
 	if clientSubnet.IsValid() {
 		message = SetClientSubnet(message, clientSubnet)
+	}
+
+	var cacheClientSubnet netip.Prefix
+	if c.independentCache {
+		if subnet, loaded := ExtractClientSubnet(message); loaded {
+			cacheClientSubnet = subnet
+		}
 	}
 
 	isSimpleRequest := len(message.Question) == 1 &&
 		len(message.Ns) == 0 &&
 		(len(message.Extra) == 0 || len(message.Extra) == 1 &&
 			message.Extra[0].Header().Rrtype == dns.TypeOPT &&
-			message.Extra[0].Header().Class > 0 &&
-			message.Extra[0].Header().Ttl == 0 &&
-			len(message.Extra[0].(*dns.OPT).Option) == 0) &&
-		!options.ClientSubnet.IsValid()
+			isCacheableDNSExtra(message.Extra[0], c.independentCache, cacheClientSubnet))
 	disableCache := !isSimpleRequest || c.disableCache || options.DisableCache
 	if !disableCache {
 		if c.cache != nil {
@@ -152,7 +227,7 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
 				}()
 			}
 		} else if c.transportCache != nil {
-			key := transportCacheKey{Question: question, transportTag: transport.Tag()}
+			key := transportCacheKey{Question: question, transportTag: transport.Tag(), clientSubnet: cacheClientSubnet}
 			cond, loaded := c.transportCacheLock.LoadOrStore(key, make(chan struct{}))
 			if loaded {
 				<-cond
@@ -163,7 +238,7 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
 				}()
 			}
 		}
-		response, ttl := c.loadResponse(question, transport)
+		response, ttl := c.loadResponse(question, transport, cacheClientSubnet)
 		if response != nil {
 			logCachedResponse(c.logger, ctx, response, ttl)
 			response.Id = message.Id
@@ -294,7 +369,7 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
 		}
 	}
 	if !disableCache {
-		c.storeCache(transport, question, response, timeToLive)
+		c.storeCache(transport, question, response, timeToLive, cacheClientSubnet)
 	}
 	response.Id = messageId
 	requestEDNSOpt := message.IsEdns0()
@@ -367,7 +442,7 @@ func sortAddresses(response4 []netip.Addr, response6 []netip.Addr, strategy C.Do
 	}
 }
 
-func (c *Client) storeCache(transport adapter.DNSTransport, question dns.Question, message *dns.Msg, timeToLive uint32) {
+func (c *Client) storeCache(transport adapter.DNSTransport, question dns.Question, message *dns.Msg, timeToLive uint32, clientSubnet netip.Prefix) {
 	if timeToLive == 0 {
 		return
 	}
@@ -378,6 +453,7 @@ func (c *Client) storeCache(transport adapter.DNSTransport, question dns.Questio
 			c.transportCache.Add(transportCacheKey{
 				Question:     question,
 				transportTag: transport.Tag(),
+				clientSubnet: clientSubnet,
 			}, message)
 		}
 	} else {
@@ -387,6 +463,7 @@ func (c *Client) storeCache(transport adapter.DNSTransport, question dns.Questio
 			c.transportCache.AddWithLifetime(transportCacheKey{
 				Question:     question,
 				transportTag: transport.Tag(),
+				clientSubnet: clientSubnet,
 			}, message, time.Second*time.Duration(timeToLive))
 		}
 	}
@@ -398,9 +475,15 @@ func (c *Client) lookupToExchange(ctx context.Context, transport adapter.DNSTran
 		Qtype:  qType,
 		Qclass: dns.ClassINET,
 	}
-	disableCache := c.disableCache || options.DisableCache
+	resolvedSubnet := c.resolveClientSubnet(ctx, options)
+	// For non-independent cache, queries with EDNS0 options (e.g. edns0-subnet) must not reuse the global cache.
+	disableCache := c.disableCache || options.DisableCache || (resolvedSubnet.IsValid() && !c.independentCache)
+	var cacheClientSubnet netip.Prefix
+	if c.independentCache {
+		cacheClientSubnet = resolvedSubnet.Masked()
+	}
 	if !disableCache {
-		cachedAddresses, err := c.questionCache(question, transport)
+		cachedAddresses, err := c.questionCache(question, transport, cacheClientSubnet)
 		if err != ErrNotCached {
 			return cachedAddresses, err
 		}
@@ -421,8 +504,8 @@ func (c *Client) lookupToExchange(ctx context.Context, transport adapter.DNSTran
 	return MessageToAddresses(response), nil
 }
 
-func (c *Client) questionCache(question dns.Question, transport adapter.DNSTransport) ([]netip.Addr, error) {
-	response, _ := c.loadResponse(question, transport)
+func (c *Client) questionCache(question dns.Question, transport adapter.DNSTransport, clientSubnet netip.Prefix) ([]netip.Addr, error) {
+	response, _ := c.loadResponse(question, transport, clientSubnet)
 	if response == nil {
 		return nil, ErrNotCached
 	}
@@ -432,7 +515,7 @@ func (c *Client) questionCache(question dns.Question, transport adapter.DNSTrans
 	return MessageToAddresses(response), nil
 }
 
-func (c *Client) loadResponse(question dns.Question, transport adapter.DNSTransport) (*dns.Msg, int) {
+func (c *Client) loadResponse(question dns.Question, transport adapter.DNSTransport, clientSubnet netip.Prefix) (*dns.Msg, int) {
 	var (
 		response *dns.Msg
 		loaded   bool
@@ -444,6 +527,7 @@ func (c *Client) loadResponse(question dns.Question, transport adapter.DNSTransp
 			response, loaded = c.transportCache.Get(transportCacheKey{
 				Question:     question,
 				transportTag: transport.Tag(),
+				clientSubnet: clientSubnet,
 			})
 		}
 		if !loaded {
@@ -458,6 +542,7 @@ func (c *Client) loadResponse(question dns.Question, transport adapter.DNSTransp
 			response, expireAt, loaded = c.transportCache.GetWithLifetime(transportCacheKey{
 				Question:     question,
 				transportTag: transport.Tag(),
+				clientSubnet: clientSubnet,
 			})
 		}
 		if !loaded {
@@ -471,6 +556,7 @@ func (c *Client) loadResponse(question dns.Question, transport adapter.DNSTransp
 				c.transportCache.Remove(transportCacheKey{
 					Question:     question,
 					transportTag: transport.Tag(),
+					clientSubnet: clientSubnet,
 				})
 			}
 			return nil, 0

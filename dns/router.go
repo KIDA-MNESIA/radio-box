@@ -42,6 +42,8 @@ type Router struct {
 	fallbackGrace         time.Duration
 	dnsReverseMapping     freelru.Cache[netip.Addr, string]
 	platformInterface     platform.Interface
+
+	serverClientSubnetFromInbound map[string]*option.ClientSubnetFromInboundOptions
 }
 
 func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOptions) *Router {
@@ -57,11 +59,12 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 	router.fallbackTimeout = time.Duration(options.DNSClientOptions.FallbackTimeoutMS) * time.Millisecond
 	router.fallbackGrace = time.Duration(options.DNSClientOptions.FallbackGraceMS) * time.Millisecond
 	router.client = NewClient(ClientOptions{
-		DisableCache:     options.DNSClientOptions.DisableCache,
-		DisableExpire:    options.DNSClientOptions.DisableExpire,
-		IndependentCache: options.DNSClientOptions.IndependentCache,
-		CacheCapacity:    options.DNSClientOptions.CacheCapacity,
-		ClientSubnet:     options.DNSClientOptions.ClientSubnet.Build(netip.Prefix{}),
+		DisableCache:            options.DNSClientOptions.DisableCache,
+		DisableExpire:           options.DNSClientOptions.DisableExpire,
+		IndependentCache:        options.DNSClientOptions.IndependentCache,
+		CacheCapacity:           options.DNSClientOptions.CacheCapacity,
+		ClientSubnet:            options.DNSClientOptions.ClientSubnet.Build(netip.Prefix{}),
+		ClientSubnetFromInbound: options.DNSClientOptions.ClientSubnetFromInbound,
 		RDRC: func() adapter.RDRCStore {
 			cacheFile := service.FromContext[adapter.CacheFile](ctx)
 			if cacheFile == nil {
@@ -74,6 +77,21 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 		},
 		Logger: router.logger,
 	})
+	if len(options.Servers) > 0 {
+		for i, serverOptions := range options.Servers {
+			if serverOptions.ClientSubnetFromInbound == nil {
+				continue
+			}
+			tag := serverOptions.Tag
+			if tag == "" {
+				tag = F.ToString(i)
+			}
+			if router.serverClientSubnetFromInbound == nil {
+				router.serverClientSubnetFromInbound = make(map[string]*option.ClientSubnetFromInboundOptions)
+			}
+			router.serverClientSubnetFromInbound[tag] = serverOptions.ClientSubnetFromInbound
+		}
+	}
 	if options.ReverseMapping {
 		router.dnsReverseMapping = common.Must1(freelru.NewSharded[netip.Addr, string](1024, maphash.NewHasher[netip.Addr]().Hash32))
 	}
@@ -219,6 +237,9 @@ func (r *Router) matchDNS(ctx context.Context, allowFakeIP bool, ruleIndex int, 
 				if action.ClientSubnet.IsValid() {
 					options.ClientSubnet = action.ClientSubnet
 				}
+				if action.ClientSubnetFromInbound != nil {
+					options.ClientSubnetFromInbound = action.ClientSubnetFromInbound
+				}
 				if len(transports) == 1 {
 					if legacyTransport, isLegacy := transports[0].(adapter.LegacyDNSTransport); isLegacy {
 						if options.Strategy == C.DomainStrategyAsIS {
@@ -258,6 +279,9 @@ func (r *Router) matchDNS(ctx context.Context, allowFakeIP bool, ruleIndex int, 
 				if action.ClientSubnet.IsValid() {
 					options.ClientSubnet = action.ClientSubnet
 				}
+				if action.ClientSubnetFromInbound != nil {
+					options.ClientSubnetFromInbound = action.ClientSubnetFromInbound
+				}
 			case *R.RuleActionReject:
 				return nil, nil, r.upstreamTimeout, r.fallbackTimeout, r.fallbackGrace, currentRule, currentRuleIndex
 			case *R.RuleActionPredefined:
@@ -270,6 +294,23 @@ func (r *Router) matchDNS(ctx context.Context, allowFakeIP bool, ruleIndex int, 
 		return nil, nil, r.upstreamTimeout, r.fallbackTimeout, r.fallbackGrace, nil, -1
 	}
 	return []adapter.DNSTransport{defaultTransport}, nil, r.upstreamTimeout, r.fallbackTimeout, r.fallbackGrace, nil, -1
+}
+
+func (r *Router) applyServerQueryOptions(transport adapter.DNSTransport, options adapter.DNSQueryOptions) adapter.DNSQueryOptions {
+	if options.ClientSubnet.IsValid() {
+		return options
+	}
+	if options.ClientSubnetFromInbound != nil {
+		return options
+	}
+	if r.serverClientSubnetFromInbound == nil {
+		return options
+	}
+	fromInbound := r.serverClientSubnetFromInbound[transport.Tag()]
+	if fromInbound != nil {
+		options.ClientSubnetFromInbound = fromInbound
+	}
+	return options
 }
 
 func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapter.DNSQueryOptions) (*mDNS.Msg, error) {
@@ -289,7 +330,7 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 	var (
 		response          *mDNS.Msg
 		selectedTransport adapter.DNSTransport
-		err              error
+		err               error
 	)
 	var metadata *adapter.InboundContext
 	ctx, metadata = adapter.ExtendContext(ctx)
@@ -320,6 +361,7 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 		if r.upstreamTimeout > 0 {
 			queryCtx, cancel = context.WithTimeout(ctx, r.upstreamTimeout)
 		}
+		options = r.applyServerQueryOptions(selectedTransport, options)
 		response, err = r.client.Exchange(queryCtx, selectedTransport, message, options, nil)
 		if cancel != nil {
 			cancel()
@@ -491,6 +533,7 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 		if r.upstreamTimeout > 0 {
 			queryCtx, cancel = context.WithTimeout(ctx, r.upstreamTimeout)
 		}
+		options = r.applyServerQueryOptions(transport, options)
 		responseAddrs, err = r.client.Lookup(queryCtx, transport, domain, options, nil)
 		if cancel != nil {
 			cancel()
@@ -642,7 +685,8 @@ func (r *Router) exchangeHedgedRacer(ctx context.Context, primaryTransports []ad
 					}
 				}
 			}
-			response, err := r.client.Exchange(perQueryCtx, transport, msgCopy, primaryOptions, responseCheck)
+			perOptions := r.applyServerQueryOptions(transport, primaryOptions)
+			response, err := r.client.Exchange(perQueryCtx, transport, msgCopy, perOptions, responseCheck)
 			select {
 			case results <- queryResult{response, err, transport}:
 			case <-returned:
@@ -679,7 +723,8 @@ func (r *Router) exchangeHedgedRacer(ctx context.Context, primaryTransports []ad
 					}
 				}
 			}
-			response, err := r.client.Exchange(perQueryCtx, transport, msgCopy, fallbackOptions, responseCheck)
+			perOptions := r.applyServerQueryOptions(transport, fallbackOptions)
+			response, err := r.client.Exchange(perQueryCtx, transport, msgCopy, perOptions, responseCheck)
 			if cancel != nil {
 				cancel()
 			}
@@ -790,7 +835,8 @@ func (r *Router) lookupHedgedRacer(ctx context.Context, primaryTransports []adap
 					}
 				}
 			}
-			addrs, err := r.client.Lookup(perQueryCtx, transport, domain, primaryOptions, responseCheck)
+			perOptions := r.applyServerQueryOptions(transport, primaryOptions)
+			addrs, err := r.client.Lookup(perQueryCtx, transport, domain, perOptions, responseCheck)
 			if err == nil && len(addrs) == 0 {
 				err = E.New("empty result")
 			}
@@ -829,7 +875,8 @@ func (r *Router) lookupHedgedRacer(ctx context.Context, primaryTransports []adap
 					}
 				}
 			}
-			addrs, err := r.client.Lookup(perQueryCtx, transport, domain, fallbackOptions, responseCheck)
+			perOptions := r.applyServerQueryOptions(transport, fallbackOptions)
+			addrs, err := r.client.Lookup(perQueryCtx, transport, domain, perOptions, responseCheck)
 			if cancel != nil {
 				cancel()
 			}
@@ -904,7 +951,8 @@ func (r *Router) exchangeRacer(ctx context.Context, transports []adapter.DNSTran
 					}
 				}
 			}
-			response, err := r.client.Exchange(perQueryCtx, transport, msgCopy, options, responseCheck)
+			perOptions := r.applyServerQueryOptions(transport, options)
+			response, err := r.client.Exchange(perQueryCtx, transport, msgCopy, perOptions, responseCheck)
 			select {
 			case results <- queryResult{response, err, transport}:
 			case <-returned:
@@ -992,7 +1040,8 @@ func (r *Router) lookupRacer(ctx context.Context, transports []adapter.DNSTransp
 					}
 				}
 			}
-			addrs, err := r.client.Lookup(perQueryCtx, transport, domain, options, responseCheck)
+			perOptions := r.applyServerQueryOptions(transport, options)
+			addrs, err := r.client.Lookup(perQueryCtx, transport, domain, perOptions, responseCheck)
 			if err == nil && len(addrs) == 0 {
 				err = E.New("empty result")
 			}

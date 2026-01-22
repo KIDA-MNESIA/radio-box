@@ -30,6 +30,7 @@ icon: material/alert-decagram
     "cache_capacity": 0,
     "reverse_mapping": false,
     "client_subnet": "",
+    "client_subnet_from_inbound": null,
     "fakeip": {}
   }
 }
@@ -108,6 +109,19 @@ LRU 缓存容量。
 如果值是 IP 地址而不是前缀，则会自动附加 `/32` 或 `/128`。
 
 可以被 `servers.[].client_subnet` 或 `rules.[].client_subnet` 覆盖。
+
+#### client_subnet_from_inbound
+
+默认情况下，如果未配置 `client_subnet`（含 `servers.[].client_subnet` / `rules.[].client_subnet` 覆盖），则会从当前 DNS 请求对应的入站连接/会话的对端地址派生一个前缀，并以 `edns0-subnet` OPT 附加记录附加到查询。
+
+格式：
+
+- 数字：作为 IPv4 前缀长度（例如 `24` 表示将 `59.110.9.191` 转换为 `59.110.9.0/24`）；IPv6 不生效。
+- 对象：`{"ipv4": 24, "ipv6": 56}`。
+
+可以被 `servers.[].client_subnet_from_inbound` 或 `rules.[].client_subnet_from_inbound` 覆盖。
+
+优先级低于 `client_subnet`。
 
 #### fakeip
 

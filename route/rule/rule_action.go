@@ -117,18 +117,20 @@ func NewDNSRuleAction(logger logger.ContextLogger, action option.DNSRuleAction) 
 			FallbackTimeout: time.Duration(action.RouteOptions.FallbackTimeoutMS) * time.Millisecond,
 			FallbackGrace:   time.Duration(action.RouteOptions.FallbackGraceMS) * time.Millisecond,
 			RuleActionDNSRouteOptions: RuleActionDNSRouteOptions{
-				Strategy:     C.DomainStrategy(action.RouteOptions.Strategy),
-				DisableCache: action.RouteOptions.DisableCache,
-				RewriteTTL:   action.RouteOptions.RewriteTTL,
-				ClientSubnet: netip.Prefix(common.PtrValueOrDefault(action.RouteOptions.ClientSubnet)),
+				Strategy:                C.DomainStrategy(action.RouteOptions.Strategy),
+				DisableCache:            action.RouteOptions.DisableCache,
+				RewriteTTL:              action.RouteOptions.RewriteTTL,
+				ClientSubnet:            netip.Prefix(common.PtrValueOrDefault(action.RouteOptions.ClientSubnet)),
+				ClientSubnetFromInbound: action.RouteOptions.ClientSubnetFromInbound,
 			},
 		}
 	case C.RuleActionTypeRouteOptions:
 		return &RuleActionDNSRouteOptions{
-			Strategy:     C.DomainStrategy(action.RouteOptionsOptions.Strategy),
-			DisableCache: action.RouteOptionsOptions.DisableCache,
-			RewriteTTL:   action.RouteOptionsOptions.RewriteTTL,
-			ClientSubnet: netip.Prefix(common.PtrValueOrDefault(action.RouteOptionsOptions.ClientSubnet)),
+			Strategy:                C.DomainStrategy(action.RouteOptionsOptions.Strategy),
+			DisableCache:            action.RouteOptionsOptions.DisableCache,
+			RewriteTTL:              action.RouteOptionsOptions.RewriteTTL,
+			ClientSubnet:            netip.Prefix(common.PtrValueOrDefault(action.RouteOptionsOptions.ClientSubnet)),
+			ClientSubnetFromInbound: action.RouteOptionsOptions.ClientSubnetFromInbound,
 		}
 	case C.RuleActionTypeReject:
 		return &RuleActionReject{
@@ -270,15 +272,18 @@ func (r *RuleActionDNSRoute) String() string {
 	}
 	if r.ClientSubnet.IsValid() {
 		descriptions = append(descriptions, F.ToString("client-subnet=", r.ClientSubnet))
+	} else if r.ClientSubnetFromInbound != nil {
+		descriptions = append(descriptions, "client-subnet-from-inbound")
 	}
 	return F.ToString("route(", strings.Join(descriptions, ","), ")")
 }
 
 type RuleActionDNSRouteOptions struct {
-	Strategy     C.DomainStrategy
-	DisableCache bool
-	RewriteTTL   *uint32
-	ClientSubnet netip.Prefix
+	Strategy                C.DomainStrategy
+	DisableCache            bool
+	RewriteTTL              *uint32
+	ClientSubnet            netip.Prefix
+	ClientSubnetFromInbound *option.ClientSubnetFromInboundOptions
 }
 
 func (r *RuleActionDNSRouteOptions) Type() string {
@@ -295,6 +300,8 @@ func (r *RuleActionDNSRouteOptions) String() string {
 	}
 	if r.ClientSubnet.IsValid() {
 		descriptions = append(descriptions, F.ToString("client-subnet=", r.ClientSubnet))
+	} else if r.ClientSubnetFromInbound != nil {
+		descriptions = append(descriptions, "client-subnet-from-inbound")
 	}
 	return F.ToString("route-options(", strings.Join(descriptions, ","), ")")
 }

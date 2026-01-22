@@ -22,7 +22,8 @@ icon: material/new-box
   "strategy": "",
   "disable_cache": false,
   "rewrite_ttl": null,
-  "client_subnet": null
+  "client_subnet": null,
+  "client_subnet_from_inbound": null
 }
 ```
 
@@ -92,6 +93,19 @@ If value is an IP address instead of prefix, `/32` or `/128` will be appended au
 
 Will overrides `dns.client_subnet`.
 
+#### client_subnet_from_inbound
+
+If `client_subnet` is not set, derive a prefix from the peer address of the inbound connection/session for the current DNS request, and append it as an `edns0-subnet` OPT extra record.
+
+Format:
+
+- Number: IPv4 prefix length (IPv6 disabled).
+- Object: `{"ipv4": 24, "ipv6": 56}`.
+
+Lower priority than `client_subnet`.
+
+Will override `dns.client_subnet_from_inbound`.
+
 ### route-options
 
 ```json
@@ -99,7 +113,8 @@ Will overrides `dns.client_subnet`.
   "action": "route-options",
   "disable_cache": false,
   "rewrite_ttl": null,
-  "client_subnet": null
+  "client_subnet": null,
+  "client_subnet_from_inbound": null
 }
 ```
 

@@ -16,7 +16,8 @@ icon: material/alert-decagram
     "servers": [
       {
         "type": "",
-        "tag": ""
+        "tag": "",
+        "client_subnet_from_inbound": null
       }
     ]
   }
@@ -46,3 +47,16 @@ DNS 服务器的类型。
 #### tag
 
 DNS 服务器的标签。
+
+#### client_subnet_from_inbound
+
+从当前 DNS 请求对应的入站连接/会话的对端地址派生一个前缀，并以 `edns0-subnet` OPT 附加记录附加到查询。
+
+格式：
+
+- 数字：作为 IPv4 前缀长度（IPv6 不生效）。
+- 对象：`{"ipv4": 24, "ipv6": 56}`。
+
+将覆盖 `dns.client_subnet_from_inbound`。
+
+优先级低于 `client_subnet`。
