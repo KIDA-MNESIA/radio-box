@@ -391,6 +391,78 @@
 
   说明：当 `resolve` 解析失败时，将停止继续匹配后续规则，直接使用默认出站（即 `route.final` 对应的出站；未设置 `route.final` 时为默认 DIRECT 出站）。
 
+### 5. 出站组：自动回退（fallback）与负载均衡（load-balance）
+
+本版本新增两种策略组出站，行为参考 mihomo：
+- 自动回退：https://wiki.metacubex.one/config/proxy-groups/fallback/
+- 负载均衡：https://wiki.metacubex.one/config/proxy-groups/load-balance/
+
+#### 5.1 自动回退（fallback）
+
+当当前出站连接失败时，会按 `outbounds` 顺序依次尝试下一个可用出站，直到成功。
+
+支持健康检查（HEAD 请求）以更快地跳过不可用节点：当存在可用性记录时，会优先尝试“已被标记可用”的节点；若都没有记录，则按列表顺序逐个尝试。
+
+配置示例：
+
+```json
+{
+  "outbounds": [
+    {
+      "type": "fallback",
+      "tag": "auto",
+      "outbounds": ["ss-a", "ss-b", "direct"],
+      "url": "https://www.gstatic.com/generate_204",
+      "interval": "3m",
+      "timeout": "5s",
+      "idle_timeout": "30m",
+      "interrupt_exist_connections": false
+    }
+  ]
+}
+```
+
+#### 5.2 负载均衡（load-balance）
+
+在 `outbounds` 中进行负载均衡选择，并在失败时自动重试切换到其他出站。
+
+支持三种策略（`strategy`）：
+- `round-robin`：按连接轮询分配到不同出站
+- `consistent-hashing`：相同“目标地址”固定分配到同一出站（域名按 `eTLD+1` 归一）
+- `sticky-sessions`：相同“来源地址 + 目标地址”固定分配到同一出站，缓存 10 分钟
+
+配置示例：
+
+```json
+{
+  "outbounds": [
+    {
+      "type": "load-balance",
+      "tag": "lb",
+      "outbounds": ["ss-a", "ss-b", "ss-c"],
+      "strategy": "sticky-sessions",
+      "url": "https://www.gstatic.com/generate_204",
+      "interval": "3m",
+      "timeout": "5s",
+      "idle_timeout": "30m"
+    }
+  ]
+}
+```
+
+#### 5.3 字段说明（fallback / load-balance 通用）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `outbounds` | []string | （必填） | 引用的出站 tag 列表（可包含其他组出站）。 |
+| `url` | string | `https://www.gstatic.com/generate_204` | 健康检查 URL（使用 HEAD 请求）。 |
+| `interval` | duration string | `3m` | 健康检查间隔。 |
+| `timeout` | duration string | `15s` | 单次健康检查超时。 |
+| `idle_timeout` | duration string | `30m` | 组长期未使用时停止周期检查。 |
+| `interrupt_exist_connections` | bool | `false` | 当选择结果发生变化时是否中断已有外部连接，以加速切换。 |
+
+> 约束：`interval` 必须小于等于 `idle_timeout`。
+
 ## 许可证
 
 本项目基于 sing-box，遵循相同的开源许可证。

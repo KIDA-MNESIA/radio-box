@@ -16,3 +16,30 @@ type URLTestOutboundOptions struct {
 	IdleTimeout               badoption.Duration `json:"idle_timeout,omitempty"`
 	InterruptExistConnections bool               `json:"interrupt_exist_connections,omitempty"`
 }
+
+type FallbackOutboundOptions struct {
+	Outbounds                 []string           `json:"outbounds"`
+	URL                       string             `json:"url,omitempty"`
+	Interval                  badoption.Duration `json:"interval,omitempty"`
+	IdleTimeout               badoption.Duration `json:"idle_timeout,omitempty"`
+	Timeout                   badoption.Duration `json:"timeout,omitempty"`
+	InterruptExistConnections bool               `json:"interrupt_exist_connections,omitempty"`
+}
+
+type LoadBalanceStrategy string
+
+const (
+	LoadBalanceStrategyRoundRobin        LoadBalanceStrategy = "round-robin"
+	LoadBalanceStrategyConsistentHashing LoadBalanceStrategy = "consistent-hashing"
+	LoadBalanceStrategyStickySessions    LoadBalanceStrategy = "sticky-sessions"
+)
+
+type LoadBalanceOutboundOptions struct {
+	Outbounds                 []string            `json:"outbounds"`
+	URL                       string              `json:"url,omitempty"`
+	Interval                  badoption.Duration  `json:"interval,omitempty"`
+	IdleTimeout               badoption.Duration  `json:"idle_timeout,omitempty"`
+	Timeout                   badoption.Duration  `json:"timeout,omitempty"`
+	Strategy                  LoadBalanceStrategy `json:"strategy,omitempty"`
+	InterruptExistConnections bool                `json:"interrupt_exist_connections,omitempty"`
+}

@@ -176,7 +176,10 @@ func (s *Selector) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn,
 
 func RealTag(detour adapter.Outbound) string {
 	if group, isGroup := detour.(adapter.OutboundGroup); isGroup {
-		return group.Now()
+		selectedTag := group.Now()
+		if selectedTag != "" {
+			return selectedTag
+		}
 	}
 	return detour.Tag()
 }
