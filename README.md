@@ -2,6 +2,59 @@
 
 基于 [sing-box](https://github.com/SagerNet/sing-box) 的修改版本，增加了一些 DNS 与路由相关的增强功能。
 
+## 项目现状
+
+- 模块路径仍为 `github.com/sagernet/sing-box`（与上游兼容）。
+- 主要改动集中在 DNS 查询策略、路由 `resolve` 行为和策略组出站能力。
+- 文档主入口为本文件。
+- `test/` 为独立 Go module（见 `test/go.mod`），需单独执行集成测试。
+
+## 快速开始
+
+1. 初始化子模块（首次克隆后）：
+   - `git submodule update --init --recursive`
+2. 本地构建（推荐）：
+   - `make build`
+3. 启动服务（默认读取 `config.json`）：
+   - `go run ./cmd/sing-box run`
+4. 指定配置文件或目录运行：
+   - `go run ./cmd/sing-box -c config.jsonc run`
+   - `go run ./cmd/sing-box -C ./config run`
+
+> `-c/--config` 支持 `.json` 与 `.jsonc`；`-C/--config-directory` 会读取目录下 `.json` 与 `.jsonc` 并按路径排序后合并。
+
+## 开发常用命令
+
+- 构建：`make build` / `make race`
+- 配置检查：`go run ./cmd/sing-box -c config.jsonc check`
+- 配置格式化：`go run ./cmd/sing-box -c config.jsonc format -w`
+- 配置合并：`go run ./cmd/sing-box merge out.json -c config.json -C ./config`
+- 主模块测试：`go test ./...`
+- 集成测试：`cd test && go mod tidy && go test -v .`
+- 一键测试：`make test` / `make test_stdio`
+- 格式化：`make fmt`
+- Lint：`make lint`
+
+## 与上游差异总览
+
+| 领域 | 本仓库状态 |
+|------|------------|
+| 配置解析 | 支持 JSONC（注释、尾逗号），含 `-c` 与 `-C` 场景 |
+| DNS 规则路由 | `server` 支持数组并行竞速，新增 `fallback_dns` 与超时参数 |
+| DNS ECS | 新增 `client_subnet_from_inbound`，并与缓存策略联动 |
+| 路由 resolve | 新增 `route_only`、`fallback_to_final` |
+| 策略组出站 | 新增 `fallback`、`load-balance`（含多策略） |
+
+## 目录导航
+
+- [新增功能](#新增功能)
+- [1. 配置/规则集支持 JSONC（带注释与尾逗号）](#1-配置规则集支持-jsonc带注释与尾逗号)
+- [2. DNS 上游竞速与超时控制](#2-dns-上游竞速与超时控制)
+- [3. DNS：基于入站对端地址派生 edns0-subnet（ECS）与缓存隔离](#3-dns基于入站对端地址派生-edns0-subnetecs与缓存隔离)
+- [4. 路由 resolve 动作增强（route_only / fallback_to_final）](#4-路由-resolve-动作增强route_only--fallback_to_final)
+- [5. 出站组：自动回退（fallback）与负载均衡（load-balance）](#5-出站组自动回退fallback与负载均衡load-balance)
+- [许可证](#许可证)
+
 ## 新增功能
 
 ### 1. 配置/规则集支持 JSONC（带注释与尾逗号）
@@ -45,9 +98,9 @@
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `upstream_timeout_ms` | uint32 | 全局上游 DNS 查询超时时间（毫秒）。`0` 表示使用默认超时。 |
-| `fallback_timeout_ms` | uint32 | 全局后备 DNS 查询超时时间（毫秒）。`0` 将使用 `upstream_timeout_ms` 的值。 |
-| `fallback_grace_ms` | uint32 | 启动后备 DNS 后，主上游仍可继续等待的宽限窗口（毫秒）。`0` 表示禁用宽限窗口。 |
+| `upstream_timeout_ms` | uint32 | 全局上游 DNS 查询超时时间（毫秒）。`0` 表示不额外设置“路由层”超时（仍受 DNS 客户端默认超时约束）。 |
+| `fallback_timeout_ms` | uint32 | 全局后备 DNS 查询超时时间（毫秒）。`0` 时继承 `upstream_timeout_ms`。 |
+| `fallback_grace_ms` | uint32 | 启动后备 DNS 后，主上游仍可继续等待的宽限窗口（毫秒）。`0` 表示全局无宽限窗口。 |
 
 #### 2.2 规则级别配置
 
@@ -72,13 +125,18 @@
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `server` | string \| []string | 目标 DNS 服务器标签。支持数组形式以实现多上游并行竞速。 |
+| `server` | string \| []string | 目标 DNS 服务器标签。支持数组形式实现多上游并行竞速。 |
 | `fallback_dns` | string \| []string | 后备 DNS 服务器标签。当主上游超时触发时启动后备查询。 |
-| `upstream_timeout_ms` | uint32 | 该规则的上游超时时间（毫秒），覆盖全局设置。 |
-| `fallback_timeout_ms` | uint32 | 该规则的后备超时时间（毫秒），覆盖全局设置。 |
-| `fallback_grace_ms` | uint32 | 该规则的宽限窗口（毫秒），覆盖全局设置。 |
+| `upstream_timeout_ms` | uint32 | 该规则的上游超时（毫秒）。`0` 时继承全局 `upstream_timeout_ms`。 |
+| `fallback_timeout_ms` | uint32 | 该规则的后备超时（毫秒）。`0` 时继承全局 `fallback_timeout_ms`；若继承后仍为 `0`，再回退到 `upstream_timeout_ms`。 |
+| `fallback_grace_ms` | uint32 | 该规则的宽限窗口（毫秒）。`0` 时继承全局 `fallback_grace_ms`。 |
 
 #### 2.3 行为说明
+
+- **超时参数优先级与 0 值规则**：
+  - 规则级优先于全局级。
+  - 规则级某项为 `0` 时，不是“关闭该功能”，而是“继承全局同名配置”。
+  - `fallback_timeout_ms` 在规则级与全局级都为 `0` 时，会回退到最终生效的 `upstream_timeout_ms`。
 
 - **多上游并行竞速**：当 `server` 配置为数组时，将并发向所有服务器发起 DNS 查询：
   - 优先使用第一个返回 `NOERROR` 的响应
@@ -296,7 +354,7 @@
 |------|------|--------|------|
 | `action` | string | （必填） | 固定为 `"resolve"`，表示执行一次 DNS 解析以辅助路由。 |
 | `route_only` | bool | `false` | `false`：解析后将目的地址改写为 `IP:Port`；`true`：解析结果仅用于路由判定，不改写目的地址，出站仍为 `Domain:Port`。 |
-| `fallback_to_final` | bool | `false` | 当本次 `resolve` 的 DNS 解析失败时，停止继续匹配后续路由规则，并使用默认出站（即 `route.final`；若未设置则为默认 DIRECT）。 |
+| `fallback_to_final` | bool | `false` | 当本次 `resolve` 的 DNS 解析失败时，停止继续匹配后续路由规则并使用默认出站（`route.final`，未设置时为默认 DIRECT）。例外：若失败原因为 `DNS server not found`，不会触发该回落。 |
 
 > 注：`fallback_to_final` 的设计受 Surge 的 `dns-failed` 行为启发。
 
@@ -394,8 +452,8 @@
 ### 5. 出站组：自动回退（fallback）与负载均衡（load-balance）
 
 本版本新增两种策略组出站，行为参考 mihomo：
-- 自动回退：https://wiki.metacubex.one/config/proxy-groups/fallback/
-- 负载均衡：https://wiki.metacubex.one/config/proxy-groups/load-balance/
+- 自动回退：[fallback](https://wiki.metacubex.one/config/proxy-groups/fallback/)
+- 负载均衡：[load-balance](https://wiki.metacubex.one/config/proxy-groups/load-balance/)
 
 #### 5.1 自动回退（fallback）
 
